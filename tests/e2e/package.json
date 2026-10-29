@@ -1,0 +1,24 @@
+{
+  "name": "@nexus/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "playwright test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@nexus/database": "workspace:*",
+    "@nexus/secrets": "workspace:*",
+    "@playwright/test": "^1.64.1",
+    "mongodb": "^7.7.0",
+    "mongodb-memory-server": "^11.3.0",
+    "vite": "^8.3.5"
+  },
+  "dependencies": {
+    "@nexus/connections": "workspace:*",
+    "@nexus/connectors": "workspace:*",
+    "@nexus/security": "workspace:*"
+  }
+}

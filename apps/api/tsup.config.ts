@@ -1,0 +1,12 @@
+import { defineConfig } from 'tsup';
+
+export default defineConfig({
+  entry: ['src/server.ts'],
+  format: ['esm'],
+  target: 'node22',
+  clean: true,
+  // Workspace packages ship as TypeScript source, so they must be bundled.
+  noExternal: [/^@nexus\//],
+  // Bundled CommonJS dependencies (the MongoDB driver) call require() for Node built-ins; an ES module has no `require`.
+  banner: { js: "import { createRequire as __nxCreateRequire } from 'node:module'; const require = __nxCreateRequire(import.meta.url);" },
+});

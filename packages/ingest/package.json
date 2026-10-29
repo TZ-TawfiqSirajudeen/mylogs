@@ -1,0 +1,29 @@
+{
+  "name": "@nexus/ingest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "bench": "tsx bench/bench.ts",
+    "bench:signals": "tsx bench/bench-signals.ts"
+  },
+  "dependencies": {
+    "@nexus/database": "workspace:*",
+    "@nexus/logstore": "workspace:*",
+    "@nexus/security": "workspace:*",
+    "@nexus/telemetry": "workspace:*",
+    "zod": "^4.6.7",
+    "@nexus/tracestore": "workspace:*",
+    "@nexus/metricstore": "workspace:*",
+    "@nexus/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.5"
+  }
+}

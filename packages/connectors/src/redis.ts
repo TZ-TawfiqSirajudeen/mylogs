@@ -1,0 +1,237 @@
+import { isIP } from 'node:net';
+import { resolveSafeTarget } from '@nexus/security';
+import {
+  ConnectorError, type Connector, type ConnectorContext, type ConnectorDescriptor, type DetectedCapability,
+  type DiscoveredResource, type DiscoveryResult, type TestReport,
+} from '@nexus/connector-sdk';
+import { Redis } from 'ioredis';
+import { z } from 'zod';
+import { fromTargetRejection, guarded, Run } from './run.js';
+
+export const RedisConfig = z.strictObject({
+  host: z.string().trim().min(1).max(253),
+  port: z.number().int().min(1).max(65535).default(6379),
+  /** ACL user (Redis 6+). Omit for the default user. */
+  username: z.string().min(1).max(128).optional(),
+  tls: z.boolean().default(true),
+});
+export type RedisConfig = z.infer<typeof RedisConfig>;
+
+const creds = { password: z.strictObject({ password: z.string().min(1).max(1024) }), none: z.strictObject({}) };
+export type RedisCreds = Partial<{ password: string }>;
+
+const INFO_SECTIONS = new Set(['server', 'clients', 'memory', 'stats', 'replication', 'keyspace', 'cluster']);
+const CONFIG_KEYS = new Set(['maxmemory', 'maxmemory-policy']);
+
+/**
+ * The only commands this connector can send. All are read-only, none returns key names or values:
+ *   PING, INFO <section>, SLOWLOG LEN (a count, not the entries), CONFIG GET maxmemory|maxmemory-policy, ACL WHOAMI.
+ * No SCAN/KEYS/GET/etc. exist in the allow-list, so keys and values can never be collected.
+ */
+export function isAllowedRedisCommand(args: string[]): boolean {
+  const [cmd, a, b] = args.map((x) => x.toLowerCase());
+  switch (cmd) {
+    case 'ping': return args.length === 1;
+    case 'info': return args.length === 2 && INFO_SECTIONS.has(a ?? '');
+    case 'slowlog': return args.length === 2 && a === 'len';
+    case 'config': return args.length === 3 && a === 'get' && CONFIG_KEYS.has(b ?? '');
+    case 'acl': return args.length === 2 && a === 'whoami';
+    default: return false;
+  }
+}
+
+export async function safeRedisCall(client: Pick<Redis, 'call'>, ...args: string[]): Promise<unknown> {
+  if (!isAllowedRedisCommand(args)) throw new Error(`Command "${args[0] ?? ''}" is not permitted for monitoring connections`);
+  return client.call(args[0]!, ...args.slice(1));
+}
+
+const descriptor: ConnectorDescriptor = {
+  type: 'redis',
+  displayName: 'Redis / Redis-compatible',
+  category: 'cache',
+  status: 'implemented',
+  collection: 'not_implemented',
+  signals: [
+    { signal: 'metrics', availability: 'supported', note: 'INFO-based: memory, clients, ops/sec, hit/miss, evictions, expirations, replication role. Metric collection itself is not wired yet.' },
+    { signal: 'inventory', availability: 'supported', note: 'Instance and keyspace key COUNTS per logical database (never key names or values).' },
+    { signal: 'logs', availability: 'unsupported' }, { signal: 'traces', availability: 'unsupported', note: 'Redis operations appear in application traces.' },
+    { signal: 'events', availability: 'requires_config', note: 'Slow-log entries are not read; only the slow-log length is available (planned).' },
+  ],
+  deploymentTypes: ['standalone', 'primary/replica (each node listed individually)', 'managed Redis-compatible services (direct endpoint)'],
+  authMethods: [
+    { id: 'password', label: 'Password / ACL user', recommended: true, description: 'Use a dedicated ACL user limited to the monitoring commands (Redis 6+). Older versions only support the shared requirepass.', secretFields: [{ name: 'password', label: 'Password' }] },
+    { id: 'none', label: 'No authentication', recommended: false, description: 'Only for local development instances.', secretFields: [] },
+  ],
+  requiredPermissions: [
+    { scope: 'ACL', permission: '+ping +info +slowlog|len +config|get +acl|whoami', why: 'The only commands the connector issues. No key access (~*) is needed.' },
+  ],
+  operations: ['PING', 'INFO', 'SLOWLOG LEN', 'CONFIG GET maxmemory*', 'ACL WHOAMI'],
+  configRequirements: ['One host:port per connection (add each primary/replica separately)', 'TLS enabled (default)'],
+  limitations: [
+    'Cluster topology is not discovered; connect to each node',
+    'No key scans, no key/value reads, ever',
+    'Hostnames are pinned to the validated IP; TLS verifies the certificate against the configured hostname',
+  ],
+  leastPrivilegeGuide: [
+    'Redis 6+ — create a monitoring user that cannot touch data:',
+    '',
+    '  ACL SETUSER nexus_monitor on >CHANGE_ME resetkeys -@all +ping +info +slowlog|len +config|get +acl|whoami',
+    '',
+    'Older Redis only has the shared password (requirepass); prefer upgrading or placing the instance behind a private agent.',
+  ].join('\n'),
+};
+
+function mapError(e: unknown): ConnectorError {
+  if (e instanceof ConnectorError) return e;
+  const err = e as { message?: string; code?: string; name?: string };
+  const m = err.message ?? '';
+  if (/WRONGPASS|NOAUTH|invalid password|invalid username-password|Authentication required|AUTH.*(failed|called without)/i.test(m)) {
+    return new ConnectorError('authentication', 'Redis rejected the credentials or requires authentication');
+  }
+  if (/NOPERM|no permissions|not allowed to run/i.test(m)) return new ConnectorError('permission_denied', 'The ACL user is not allowed to run a required command');
+  if (/timed? ?out|ETIMEDOUT/i.test(m) || err.code === 'ETIMEDOUT') return new ConnectorError('timeout', 'The connection to Redis timed out');
+  if (/ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ECONNRESET|ENETUNREACH|Connection is closed|closed the connection|EPIPE/i.test(m) || /ECONN|ENOTFOUND/.test(err.code ?? '')) {
+    return new ConnectorError('unreachable', 'Redis is not reachable at the given address');
+  }
+  if (/ssl|tls|certificate|handshake|wrong version number/i.test(m)) {
+    return new ConnectorError('misconfigured', 'TLS handshake with Redis failed', { remediation: 'Check that the endpoint speaks TLS with a trusted certificate that matches the host name, or that TLS is disabled for a non-TLS dev instance.' });
+  }
+  if (err.name === 'AbortError') return new ConnectorError('cancelled', 'Cancelled');
+  return new ConnectorError('internal', 'Unexpected Redis error');
+}
+
+async function withRedis<T>(ctx: ConnectorContext, config: RedisConfig, c: RedisCreds, fn: (r: Redis) => Promise<T>): Promise<T> {
+  if (ctx.signal.aborted) throw new ConnectorError('cancelled', 'Cancelled');
+  let target;
+  try { target = await resolveSafeTarget(config.host, config.port, ctx.network); } catch (e) { throw fromTargetRejection(e); }
+  const ip = target.addresses[0]!;
+  const hostIsName = !isIP(target.host);
+  const client = new Redis({
+    // Connect to the validated IP, never to the name (no second DNS resolution -> no rebinding window).
+    host: ip, port: target.port,
+    ...(config.username ? { username: config.username } : {}),
+    ...(c.password ? { password: c.password } : {}),
+    // TLS certificate validation stays on and is checked against the configured host NAME.
+    ...(config.tls ? { tls: { ...(hostIsName ? { servername: target.host } : {}) } } : {}),
+    lazyConnect: true, connectTimeout: 5_000, commandTimeout: 5_000,
+    maxRetriesPerRequest: 0, retryStrategy: () => null, reconnectOnError: () => false,
+    enableOfflineQueue: false, autoResubscribe: false, connectionName: 'nexus-monitor',
+  });
+  // ioredis reports the REAL cause (WRONGPASS, NOAUTH, NOPERM, ECONNREFUSED...) as an 'error' event and then fails the
+  // awaited call with a generic "Connection is closed.". Keep the event: it also prevents an unhandled 'error' crash.
+  let lastEvent: unknown;
+  client.on('error', (e) => { lastEvent = e; });
+  const onAbort = () => client.disconnect();
+  ctx.signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    await client.connect();
+    return await fn(client);
+  } catch (e) {
+    if (ctx.signal.aborted) throw new ConnectorError('cancelled', 'Cancelled');
+    const fromEvent = lastEvent ? mapError(lastEvent) : null;
+    // The event is more specific than the generic "Connection is closed" unless it is itself unclassifiable.
+    const mapped = fromEvent && fromEvent.kind !== 'internal' ? fromEvent : mapError(e);
+    // A TLS client talking to a plaintext port just hangs in the handshake; say so instead of a bare "timed out".
+    if (config.tls && mapped.kind === 'timeout') {
+      throw new ConnectorError('timeout', 'The TLS handshake with Redis did not complete in time', {
+        remediation: 'The endpoint did not answer the TLS handshake. If it does not use TLS, turn TLS off (acceptable only for local development); otherwise check the port and certificate.',
+      });
+    }
+    throw mapped;
+  } finally {
+    ctx.signal.removeEventListener('abort', onAbort);
+    client.disconnect();
+  }
+}
+
+type Info = Record<string, string>;
+function parseInfo(raw: unknown): Info {
+  const out: Info = {};
+  for (const line of String(raw).split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) continue;
+    const i = line.indexOf(':');
+    if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
+  }
+  return out;
+}
+
+interface Probe { version: string; mode: string; role: string; caps: DetectedCapability[]; info: Info; keyspace: { db: string; keys: number; expires: number }[] }
+
+async function probe(client: Redis): Promise<Probe> {
+  await safeRedisCall(client, 'PING');
+  const server = parseInfo(await safeRedisCall(client, 'INFO', 'server'));
+  const caps: DetectedCapability[] = [];
+  const info: Info = { ...server };
+  for (const [section, cap, label] of [
+    ['memory', 'memory', 'Memory usage'], ['clients', 'clients', 'Connected clients'], ['stats', 'stats', 'Operation rate, hit/miss, evictions, expirations'],
+    ['replication', 'replication', 'Replication role and health'], ['keyspace', 'keyspace', 'Key counts per database'],
+  ] as const) {
+    try {
+      Object.assign(info, parseInfo(await safeRedisCall(client, 'INFO', section)));
+      caps.push({ id: cap, label, available: true, signal: cap === 'keyspace' ? 'inventory' : 'metrics' });
+    } catch (e) {
+      const m = mapError(e);
+      caps.push({ id: cap, label, available: false, signal: cap === 'keyspace' ? 'inventory' : 'metrics', reason: m.kind === 'permission_denied' ? 'Missing ACL permission +info' : m.message });
+    }
+  }
+  for (const [id, label, args] of [
+    ['slowlog_len', 'Slow-log length', ['SLOWLOG', 'LEN']], ['config_memory', 'Memory limit and eviction policy', ['CONFIG', 'GET', 'maxmemory']], ['acl_whoami', 'ACL identity', ['ACL', 'WHOAMI']],
+  ] as const) {
+    try { await safeRedisCall(client, ...args); caps.push({ id, label, available: true, signal: 'metrics' }); } catch (e) {
+      const m = mapError(e);
+      caps.push({ id, label, available: false, signal: 'metrics', reason: /unknown command|ERR unknown/i.test((e as Error).message) ? 'Not supported by this Redis version' : m.kind === 'permission_denied' ? 'Missing ACL permission' : m.message });
+    }
+  }
+  const keyspace = Object.entries(info).filter(([k]) => /^db\d+$/.test(k)).map(([db, v]) => {
+    const keys = /keys=(\d+)/.exec(v)?.[1];
+    const expires = /expires=(\d+)/.exec(v)?.[1];
+    return { db, keys: Number(keys ?? 0), expires: Number(expires ?? 0) };
+  });
+  return { version: info.redis_version ?? 'unknown', mode: info.redis_mode ?? 'standalone', role: info.role ?? 'unknown', caps, info, keyspace };
+}
+
+export const redisConnector: Connector<RedisConfig, RedisCreds> = {
+  descriptor,
+  configSchema: RedisConfig as never,
+  credentialSchema: (m) => (m in creds ? (creds[m as keyof typeof creds] as never) : undefined),
+
+  validateConfig(config, authMethod) {
+    const issues: string[] = [];
+    if (authMethod === 'none' && config.username) issues.push('Remove the username when no authentication is used');
+    return issues;
+  },
+
+  async test(ctx, config, c): Promise<TestReport> {
+    const run = new Run(Object.values(c).filter((v): v is string => typeof v === 'string'));
+    return guarded(run, async () => {
+      if (!config.tls) run.warn('tls', 'Transport security', 'TLS is disabled: the password and metrics cross the network unencrypted.', 'Enable TLS unless this is a local development instance.');
+      const p = await run.step('probe', `Connect, authenticate and probe ${config.host}:${config.port}`, () => withRedis(ctx, config, c, probe),
+        (r) => `Redis ${r.version}, ${r.mode}, role ${r.role}`);
+      for (const cap of p.caps) run.capability(cap);
+      run.facts.version = p.version;
+      run.facts.mode = p.mode;
+      run.facts.role = p.role;
+      run.facts.connectedClients = Number(p.info.connected_clients ?? 0);
+      if (!p.caps.find((x) => x.id === 'memory')?.available || !p.caps.find((x) => x.id === 'stats')?.available) {
+        throw new ConnectorError('permission_denied', 'The user cannot run INFO memory/stats, which are required for monitoring', {
+          remediation: 'Grant +info (and +ping) to the monitoring ACL user. See "Required permissions".',
+        });
+      }
+    });
+  },
+
+  async discover(ctx, config, c): Promise<DiscoveryResult> {
+    const p = await withRedis(ctx, config, c, probe);
+    const name = `${config.host}:${config.port}`;
+    const resources: DiscoveredResource[] = [{
+      id: `instance:${name}`, type: 'redis_instance', name,
+      attributes: { version: p.version, mode: p.mode, role: p.role, usedMemoryHuman: p.info.used_memory_human ?? null, connectedClients: Number(p.info.connected_clients ?? 0) },
+      signals: ['metrics', 'inventory'],
+    }];
+    // Key COUNTS only. Names/values are never requested (the allow-list has no command that could return them).
+    for (const k of p.keyspace.slice(0, 64)) {
+      resources.push({ id: `db:${name}:${k.db}`, type: 'redis_database', name: k.db, attributes: { keys: k.keys, keysWithExpiry: k.expires, instance: name }, signals: ['inventory'] });
+    }
+    return { resources, capabilities: p.caps, truncated: p.keyspace.length > 64 };
+  },
+};

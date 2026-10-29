@@ -1,0 +1,71 @@
+# OpenTelemetry Collector (contrib) -> Nexus Observability (logs, traces and metrics over OTLP/HTTP).
+#
+# Verified with the official otelcol-contrib v0.164.0 binary:
+#   * `otelcol-contrib validate --config infra/otel-collector/config.yaml` passes, and
+#   * tests/e2e/specs/12-collector-path.spec.ts runs THIS file unmodified (only environment variables differ) and proves authenticated OTLP/HTTP
+#     logs, TRACES and METRICS (and a tailed log file) reach the ingestion service and appear in the UI.
+# See docs/runbooks/collector.md for the exact procedure. OTLP/gRPC INGESTION is not supported by Nexus: the Collector receives gRPC from your
+# applications if you enable it, but always exports to Nexus over OTLP/HTTP.
+#
+# Run:
+#   NEXUS_INGEST_TOKEN=nxi_... NEXUS_INGEST_BASE_URL=https://ingest.example.com \
+#     otelcol-contrib --config infra/otel-collector/config.yaml
+#
+# Environment (all but the token have defaults):
+#   NEXUS_INGEST_TOKEN      per-environment ingestion token (REQUIRED; never commit it)
+#   NEXUS_INGEST_BASE_URL   base URL of the Nexus ingestion service (the exporter appends /v1/logs, /v1/traces, /v1/metrics)
+#   OTLP_GRPC_ENDPOINT      where applications send OTLP/gRPC       (default 0.0.0.0:4317)
+#   OTLP_HTTP_ENDPOINT      where applications send OTLP/HTTP       (default 0.0.0.0:4318 — use another port next to the ingest service)
+#   NEXUS_FILELOG_INCLUDE   glob of JSON-lines log files to tail    (default /var/log/myapp/*.log)
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: "${env:OTLP_GRPC_ENDPOINT:-0.0.0.0:4317}" }
+      http: { endpoint: "${env:OTLP_HTTP_ENDPOINT:-0.0.0.0:4318}" }
+  filelog:                              # optional: tail application log files (JSON lines)
+    include: [ "${env:NEXUS_FILELOG_INCLUDE:-/var/log/myapp/*.log}" ]
+    start_at: beginning
+    operators:
+      - type: json_parser
+        timestamp: { parse_from: attributes.time, layout_type: gotime, layout: '2006-01-02T15:04:05.000Z07:00' }
+        severity: { parse_from: attributes.level }
+      - type: move
+        from: attributes.msg
+        to: body
+
+processors:
+  memory_limiter: { check_interval: 1s, limit_mib: 512 }
+  batch: { send_batch_size: 2000, timeout: 1s }
+  # Defence in depth: mask obvious secrets at the edge as well. Nexus masks again on ingestion.
+  attributes/mask:
+    actions:
+      - { key: http.request.header.authorization, action: update, value: "[REDACTED]" }
+      - { key: http.request.header.cookie, action: update, value: "[REDACTED]" }
+
+exporters:
+  otlphttp/nexus:
+    logs_endpoint: "${env:NEXUS_INGEST_BASE_URL:-https://ingest.example.com}/v1/logs"
+    traces_endpoint: "${env:NEXUS_INGEST_BASE_URL:-https://ingest.example.com}/v1/traces"
+    metrics_endpoint: "${env:NEXUS_INGEST_BASE_URL:-https://ingest.example.com}/v1/metrics"
+    compression: gzip
+    headers:
+      Authorization: "Bearer ${env:NEXUS_INGEST_TOKEN}"  # per-environment token, never committed
+    retry_on_failure: { enabled: true, initial_interval: 1s, max_interval: 30s, max_elapsed_time: 10m }  # honours 429/503 Retry-After
+    sending_queue: { enabled: true, queue_size: 5000 }
+
+service:
+  telemetry:
+    metrics: { level: none }            # the Collector's own metrics server is not needed (and would clash on a shared host)
+  pipelines:
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, attributes/mask, batch]
+      exporters: [otlphttp/nexus]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/mask, batch]
+      exporters: [otlphttp/nexus]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/nexus]

@@ -1,0 +1,139 @@
+{
+  "machine": {
+    "cpus": 8,
+    "cpuModel": "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz",
+    "memGiB": 16,
+    "node": "v22.17.0"
+  },
+  "dataset": {
+    "records": 300000,
+    "spanHours": 6,
+    "avgRecordBytesOnWire": 543
+  },
+  "ingestion": {
+    "recordsPerSecond": 9830,
+    "seconds": 30.5,
+    "batchSize": 1000,
+    "concurrency": 4,
+    "batchLatencyMs": {
+      "p50": 374.9,
+      "p95": 709.6,
+      "max": 1168.5
+    },
+    "note": "in-process pipeline (validation, normalization, redaction, quota, bounded idempotent insert), JSON OTLP bodies pre-built; excludes HTTP and TLS"
+  },
+  "storage": {
+    "dataMiB": 338,
+    "storageMiB": 53,
+    "indexMiB": 116,
+    "avgObjBytes": 1131
+  },
+  "queries": [
+    {
+      "name": "latest 100 (last 15 min)",
+      "p50": 3.6,
+      "p95": 4.6,
+      "max": 4.6,
+      "runs": 15
+    },
+    {
+      "name": "latest 100 (last 6 h, whole dataset)",
+      "p50": 2.4,
+      "p95": 3.4,
+      "max": 3.4,
+      "runs": 15
+    },
+    {
+      "name": "errors only (last 6 h)",
+      "p50": 16.1,
+      "p95": 95.5,
+      "max": 95.5,
+      "runs": 15
+    },
+    {
+      "name": "service filter + min severity (6 h)",
+      "p50": 8.3,
+      "p95": 58.5,
+      "max": 58.5,
+      "runs": 15
+    },
+    {
+      "name": "HTTP status >= 500 filter (6 h)",
+      "p50": 11.9,
+      "p95": 95.2,
+      "max": 95.2,
+      "runs": 15
+    },
+    {
+      "name": "attribute filter customer.tier=gold (6 h)",
+      "p50": 3.5,
+      "p95": 14.3,
+      "max": 14.3,
+      "runs": 8
+    },
+    {
+      "name": "text search \"upstream payments\" (6 h, regex)",
+      "p50": 66.7,
+      "p95": 76.7,
+      "max": 76.7,
+      "runs": 8
+    },
+    {
+      "name": "text search, no match (6 h) — worst case scan",
+      "p50": 627.3,
+      "p95": 691.5,
+      "max": 691.5,
+      "runs": 5
+    },
+    {
+      "name": "trace lookup (indexed)",
+      "p50": 2,
+      "p95": 3.6,
+      "max": 3.6,
+      "runs": 15
+    },
+    {
+      "name": "request id filter (indexed)",
+      "p50": 2.2,
+      "p95": 3,
+      "max": 3,
+      "runs": 15
+    },
+    {
+      "name": "deep page (cursor after 2,000 rows)",
+      "p50": 11,
+      "p95": 16,
+      "max": 16,
+      "runs": 15
+    },
+    {
+      "name": "histogram, 60 buckets (6 h)",
+      "p50": 109,
+      "p95": 115.3,
+      "max": 115.3,
+      "runs": 5
+    },
+    {
+      "name": "facets (6 h)",
+      "p50": 280.5,
+      "p95": 338.9,
+      "max": 338.9,
+      "runs": 5
+    }
+  ],
+  "mixedLoad": {
+    "durationSec": 4,
+    "ingestRecordsPerSecond": 3250,
+    "concurrentReaders": 8,
+    "readerQueriesCompleted": 390,
+    "readerLatencyMs": {
+      "p50": 53.4,
+      "p95": 177.3
+    }
+  },
+  "caveats": [
+    "single mongod, in-memory-server defaults, same machine as the load generator",
+    "regex text search scans the time-bounded index range: cost grows with the range"
+  ],
+  "measuredAt": "2026-10-28T10:39:55.018Z"
+}

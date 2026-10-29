@@ -1,0 +1,25 @@
+@import 'tailwindcss';
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
+body { @apply bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100; }
+:focus-visible { @apply outline-2 outline-offset-2 outline-indigo-500; }
+
+/*
+ * Contrast (WCAG AA, verified by the axe e2e suite). Muted and link colours that pass on light backgrounds fall below
+ * 4.5:1 on the dark surface, so the dark theme maps them to lighter steps of the same hue in ONE place.
+ */
+.dark .text-slate-500 { color: var(--color-slate-400); }
+.dark .text-indigo-600, .dark .text-indigo-700 { color: var(--color-indigo-300); }
+.dark .text-red-600 { color: var(--color-red-400); }
+.dark .text-emerald-600 { color: var(--color-emerald-400); }
+
+/* Long unbroken user-supplied text (project/connection names) must wrap inside its container, never widen the page. */
+main h1, main h2, main h3, main p, main dd, main dt, main li, main span, main label { overflow-wrap: anywhere; }
+main .grid > *, main .flex > * { min-width: 0; }
+select { max-width: 100%; text-overflow: ellipsis; }
+header select { max-width: 16rem; }

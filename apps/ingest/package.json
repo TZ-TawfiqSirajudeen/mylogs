@@ -1,0 +1,29 @@
+{
+  "name": "@nexus/ingest-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=../../.env src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@nexus/database": "workspace:*",
+    "@nexus/ingest": "workspace:*",
+    "@nexus/logstore": "workspace:*",
+    "@nexus/security": "workspace:*",
+    "@nexus/telemetry": "workspace:*",
+    "fastify": "^5.12.7",
+    "zod": "^4.6.7",
+    "@nexus/tracestore": "workspace:*",
+    "@nexus/metricstore": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^9.0.0",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.5"
+  }
+}

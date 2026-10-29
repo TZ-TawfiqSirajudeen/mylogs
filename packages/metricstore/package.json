@@ -1,0 +1,22 @@
+{
+  "name": "@nexus/metricstore",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@nexus/contracts": "workspace:*",
+    "@nexus/database": "workspace:*",
+    "zod": "^4.6.7",
+    "@nexus/telemetry": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.5"
+  }
+}

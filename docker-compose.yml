@@ -1,0 +1,106 @@
+# Reproducible local stack:   docker compose up --build
+#   web   http://localhost:8080        (UI; /api is proxied to the API)
+#   api   http://localhost:4000        ingest http://localhost:4318 (OTLP/HTTP)
+#
+# Optional profiles
+#   --profile oidc       adds the DEV-ONLY mock identity provider on :9000 and switches the API to AUTH_MODE=oidc
+#                        (run with:  AUTH_MODE=oidc docker compose --profile oidc up --build)
+#   --profile collector  adds an OpenTelemetry Collector that forwards to the ingest service (needs NEXUS_INGEST_TOKEN)
+#
+# This file is for DEVELOPMENT. It uses a throw-away key-encryption key and demo data. Production deployments must supply
+# SECRETS_KEYS / OIDC_CLIENT_SECRET from the platform's secret manager (see docs/deployment.md).
+#
+# STATUS: statically validated only (YAML parses; every variable name matches the services' config schemas). It has NOT been
+# started with Docker in the environment this repository was developed in (Docker was unavailable there).
+
+x-node-env: &node-env
+  MONGODB_URI: mongodb+srv://hariharanrpandi:Admin123@thetazero.urw0lat.mongodb.net/?retryWrites=true&w=majority
+  MONGODB_DB: nexus
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Dev conveniences. Both are refused when NODE_ENV=production.
+  NODE_ENV: development
+  SECRETS_DEV_KEY_FILE: /data/dev-secrets/kek.json
+  NETWORK_ALLOW_LOOPBACK: "true"
+  NETWORK_ALLOW_INSECURE_HTTP: "true"
+
+services:
+  mongo:
+    image: mongo:7.0
+    # A single-node replica set: transactions (used by project/org management) require one.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --eval
+          "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}).ok }"
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+    volumes: [mongo-data:/data/db]
+
+  api:
+    build: { context: ., target: api }
+    depends_on: { mongo: { condition: service_healthy } }
+    environment:
+      <<: *node-env
+      AUTH_MODE: ${AUTH_MODE:-dev}
+      # The browser talks to the web container, so this is the origin users see (cookies + CSRF Origin check use it).
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
+      INGEST_PUBLIC_URL: ${INGEST_PUBLIC_URL:-http://localhost:4318}
+      # OIDC (only read when AUTH_MODE=oidc). Defaults point at the bundled mock IdP; override for a real provider.
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://mock-idp:9000}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-nexus-local}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-local-dev-secret-change-me}
+      OIDC_ALLOW_INSECURE_ISSUER: ${OIDC_ALLOW_INSECURE_ISSUER:-true}
+      OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-Mock IdP}
+    ports: ["4000:4000"]
+    volumes: [dev-secrets:/data/dev-secrets]
+    command: ["node", "dist/server.js", "--seed"] # --seed adds DEMO users/orgs; refused in production
+
+  worker:
+    build: { context: ., target: worker }
+    depends_on: { mongo: { condition: service_healthy } }
+    environment: { <<: *node-env }
+    volumes: [dev-secrets:/data/dev-secrets]
+
+  ingest:
+    build: { context: ., target: ingest }
+    depends_on: { mongo: { condition: service_healthy } }
+    environment: { <<: *node-env }
+    ports: ["4318:4318"]
+
+  web:
+    build: { context: ., target: web }
+    depends_on: [api]
+    ports: ["8080:8080"]
+
+  # ------------------------------------------------------------------ profile: oidc
+  mock-idp:
+    profiles: [oidc]
+    build: { context: ., target: mock-idp }
+    environment:
+      MOCK_IDP_PORT: "9000"
+      # The IdP's own URL as seen by BOTH the browser and the API container: map `mock-idp` to 127.0.0.1 in your hosts file,
+      # or use a real provider. (The issuer is part of every token, so the two views must use the same name.)
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-nexus-local}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-local-dev-secret-change-me}
+    ports: ["9000:9000"]
+
+  # ------------------------------------------------------------------ profile: collector
+  otel-collector:
+    profiles: [collector]
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      NEXUS_INGEST_TOKEN: ${NEXUS_INGEST_TOKEN:?create an ingest token in the UI (Data Sources > Ingestion) and export NEXUS_INGEST_TOKEN}
+      NEXUS_INGEST_BASE_URL: http://ingest:4318
+    volumes: [./infra/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro]
+    ports: ["4317:4317", "14318:4318"] # OTLP gRPC / HTTP for your applications (HTTP on 14318 to avoid the ingest port)
+    depends_on: [ingest]
+
+volumes:
+  mongo-data:
+  dev-secrets:

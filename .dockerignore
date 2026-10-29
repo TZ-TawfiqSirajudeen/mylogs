@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+.git
+.env
+.env.*
+!.env.example
+.dev-secrets
+.mongo-data
+coverage
+.vite
+tests/e2e/.results
+**/*.log
+docs/performance-results.json

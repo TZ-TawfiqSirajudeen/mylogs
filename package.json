@@ -1,0 +1,26 @@
+{
+  "name": "nexus-observability",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.13.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:mongo": "pnpm --filter @nexus/database dev:mongo",
+    "dev:api": "pnpm --filter @nexus/api dev",
+    "dev:web": "pnpm --filter @nexus/web dev",
+    "dev:idp": "pnpm --filter @nexus/mock-idp start",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --workspace-concurrency=1 test",
+    "build": "pnpm -r build",
+    "e2e": "pnpm --filter @nexus/e2e e2e",
+    "dev:ingest": "pnpm --filter @nexus/ingest-service dev",
+    "bench": "pnpm --filter @nexus/ingest bench"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
