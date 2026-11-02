@@ -138,7 +138,7 @@ jobs:
           printf '{"id":"dev","key":"%s"}\n' "$canary" > .dev-secrets/kek.json
           printf '%s\n' "$canary" > packages/database/.mongo-data/canary.wt
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: docker build --target ${{ matrix.target }}
         uses: docker/build-push-action@v6
@@ -207,7 +207,7 @@ jobs:
             -v "$PWD/infra/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
             "$img" nginx -t
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Start the default stack (dev auth) and wait until every service is healthy
         run: docker compose up -d --build --wait --wait-timeout 420
