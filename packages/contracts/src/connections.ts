@@ -74,7 +74,8 @@ export const ConnectionDto = z.object({
   secrets: z.record(z.string(), z.object({ set: z.literal(true), updatedAt: z.iso.datetime() })),
   signals: z.array(z.object({ signal: SignalName, availability: z.string() })),
   capabilities: z.array(Capability),
-  selection: z.object({ resourceIds: z.array(z.string()), signals: z.array(z.string()) }).nullable(),
+  /** What was chosen in the wizard. `resources` carries the human-readable names from the stored discovery so the UI can always show them. */
+  selection: z.object({ resourceIds: z.array(z.string()), signals: z.array(z.string()), resources: z.array(z.object({ id: z.string(), name: z.string(), type: z.string() })) }).nullable(),
   settings: ConnectionSettings.nullable(),
   lastTest: z.object({ at: z.iso.datetime(), ok: z.boolean(), steps: z.array(Step), facts: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])), durationMs: z.number(), stale: z.boolean() }).nullable(),
   health: z.object({
@@ -87,7 +88,17 @@ export const ConnectionDto = z.object({
     collectionLagSeconds: z.number().nullable(),
     remediation: z.string().nullable(),
   }),
-  collection: z.object({ status: z.enum(['not_implemented', 'not_started', 'running', 'stopped']), lastSuccessfulCollectionAt: z.iso.datetime().nullable(), note: z.string() }),
+  collection: z.object({
+    status: z.enum(['not_implemented', 'not_selected', 'not_started', 'running', 'stopped']),
+    lastSuccessfulCollectionAt: z.iso.datetime().nullable(),
+    lastAttemptAt: z.iso.datetime().nullable(),
+    consecutiveFailures: z.number(),
+    lastError: ErrorRecord.nullable(),
+    lastSeries: z.number().nullable(),
+    /** Partial failures (a command the target refused) and dropped-series notices from the last successful collection. */
+    notes: z.array(z.string()),
+    note: z.string(),
+  }),
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(), activatedAt: z.iso.datetime().nullable(),
 });
 export type ConnectionDto = z.infer<typeof ConnectionDto>;

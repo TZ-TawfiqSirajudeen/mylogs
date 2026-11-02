@@ -141,7 +141,8 @@ describe('full lifecycle: test -> discover -> select -> configure -> activate ->
     expect(await code(svc.setSelection(scope, id, actor, { resourceIds: ['ghost'], signals: ['metrics'] }))).toBe('400:unknown_resource');
     expect(await code(svc.setSelection(scope, id, actor, { resourceIds: ['endpoint'], signals: ['logs'] }))).toBe('400:unsupported_signal');
     const c = await svc.setSelection(scope, id, actor, { resourceIds: ['endpoint'], signals: ['metrics'] });
-    expect(c.selection).toEqual({ resourceIds: ['endpoint'], signals: ['metrics'] });
+    // The DTO carries the discovered names, so the UI can always show what was chosen (not just opaque ids).
+    expect(c.selection).toEqual({ resourceIds: ['endpoint'], signals: ['metrics'], resources: [{ id: 'endpoint', name: discovery.resources[0]!.name, type: discovery.resources[0]!.type }] });
   });
 
   test('settings are validated (bounds) and preview shows exactly what will run, honestly', async () => {

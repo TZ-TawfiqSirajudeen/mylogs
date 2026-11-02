@@ -75,10 +75,22 @@ export interface ConnectionDoc {
     lastCheckAt: Date | null; lastSuccessAt: Date | null; lastCheckDurationMs: number | null;
     consecutiveFailures: number; nextCheckAt: Date | null;
     lastError: ConnectionErrorRecord | null; recentErrors: ConnectionErrorRecord[];
-    /** Always null until a collector exists: there is no collection lag to report. */
+    /** Stored as 0 after a successful collection; the API computes the live lag from `collection.lastSuccessfulCollectionAt`. */
     collectionLagSeconds: number | null;
   };
-  collection: { status: 'not_implemented' | 'not_started' | 'running' | 'stopped'; lastSuccessfulCollectionAt: Date | null };
+  collection: {
+    /** not_implemented: the connector cannot collect. not_selected: it can, but the metrics signal was not chosen. */
+    status: 'not_implemented' | 'not_selected' | 'not_started' | 'running' | 'stopped';
+    lastSuccessfulCollectionAt: Date | null;
+    /** The fields below are absent on connections created before collection existed. */
+    lastAttemptAt?: Date | null;
+    consecutiveFailures?: number;
+    lastError?: ConnectionErrorRecord | null;
+    /** Series (name + labels) returned by the last successful collection. */
+    lastSeries?: number | null;
+    /** Partial failures and dropped-series notices of the last successful collection (bounded). */
+    lastNotes?: string[];
+  };
   /** Lease so several workers never check the same connection at once. */
   lease: { owner: string; until: Date } | null;
   /** Bumped whenever config, auth method or credentials change; a passing test is only valid for the version it ran against. */

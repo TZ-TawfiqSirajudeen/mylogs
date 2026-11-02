@@ -40,7 +40,9 @@ export function applyReport(
     ...base, state, consecutiveFailures: failures, lastError: err,
     recentErrors: [err, ...h.recentErrors].slice(0, MAX_RECENT_ERRORS),
     nextCheckAt: o.scheduled
-      ? new Date(now.getTime() + nextCheckDelay(failures, { intervalMs: o.intervalMs, maxBackoffMs: MAX_BACKOFF_MS }, f.retryAfterMs, o.random ?? RANDOM_FREE))
+      // 'unhealthy' = the target answers but reports a problem (e.g. one replica-set member is down). It is not hammered by polling, so it keeps its normal
+      // interval instead of backing off: backing off would blind monitoring - and the metric collection that follows a degraded check - exactly when it matters.
+      ? new Date(now.getTime() + nextCheckDelay(f.kind === 'unhealthy' ? 0 : failures, { intervalMs: o.intervalMs, maxBackoffMs: MAX_BACKOFF_MS }, f.retryAfterMs, o.random ?? RANDOM_FREE))
       : null,
   };
 }

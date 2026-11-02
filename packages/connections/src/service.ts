@@ -3,13 +3,13 @@ import type { ConnectionDoc, ConnectionHealthState, Database, StoredResource } f
 import type { AuditSink, RequestContext } from '@nexus/database';
 import { SecretDecryptionError, SecretNotFoundError, type SecretStore } from '@nexus/secrets';
 import {
-  ConnectorError, REMEDIATION, toConnectorError, withDeadline,
-  type Connector, type ConnectorContext, type ConnectorRegistry, type DiscoveryResult, type TestReport,
+  capSeries, ConnectorError, nextCheckDelay, REMEDIATION, toConnectorError, withDeadline,
+  type Connector, type ConnectorContext, type ConnectorRegistry, type DiscoveryResult, type MetricSample, type TestReport,
 } from '@nexus/connector-sdk';
 import { scrubKnownSecrets, type NetworkPolicy } from '@nexus/security';
 import { toDto } from './dto.js';
 import { notFound, ServiceError } from './errors.js';
-import { applyReport, initialHealth, TEST_FRESH_MS } from './health.js';
+import { applyReport, initialHealth, MAX_BACKOFF_MS, TEST_FRESH_MS } from './health.js';
 
 export interface Scope {
   orgId: string;
@@ -19,6 +19,12 @@ export interface Scope {
 }
 export interface Actor { userId: string | null; ctx: RequestContext }
 
+/** What a collection run hands to storage. The worker adapts this to the metric store; the service never imports storage. */
+export interface CollectedBatch { connectionId: string; connectionName: string; connectorType: string; samples: MetricSample[] }
+export interface CollectionSink {
+  write(ctx: { orgId: string; projectId: string; environmentId: string; retentionMs: number }, batch: CollectedBatch, now: Date): Promise<{ accepted: number; rejected: number; notes: string[] }>;
+}
+
 export interface ConnectionServiceDeps {
   db: Database;
   secrets: SecretStore;
@@ -27,6 +33,11 @@ export interface ConnectionServiceDeps {
   network: NetworkPolicy;
   now?: () => Date;
   testTimeoutMs?: number;
+  /** Where collected metrics go. Absent (e.g. in the API process) = this process never collects. */
+  sink?: CollectionSink;
+  collectTimeoutMs?: number;
+  /** After a deadline fires, how long a connector gets to return what it has before the run is abandoned (default 1000 ms). */
+  abortGraceMs?: number;
   maxConnectionsPerEnvironment?: number;
 }
 
@@ -43,6 +54,20 @@ function mapStrings<T>(v: T, fn: (s: string) => string): T {
   if (Array.isArray(v)) return v.map((x) => mapStrings(x, fn)) as T;
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, mapStrings(x, fn)])) as T;
   return v;
+}
+
+/**
+ * Bounds a connector call by its deadline even when the connector ignores its AbortSignal (a DNS lookup, a driver call that never rejects): without this
+ * such a call would hold a worker slot, and the connection's lease, forever. A connector that DOES honour the signal gets `graceMs` to return partial results.
+ */
+function raceDeadline<T>(dl: { signal: AbortSignal; timedOut(): boolean }, work: Promise<T>, graceMs: number): Promise<T> {
+  work.catch(() => undefined);
+  return new Promise<T>((resolve, reject) => {
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = () => { timer = setTimeout(() => reject(dl.timedOut() ? new ConnectorError('timeout', 'The operation exceeded its time limit') : new ConnectorError('cancelled', 'Cancelled')), graceMs); };
+    if (dl.signal.aborted) onAbort(); else dl.signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => { clearTimeout(timer); dl.signal.removeEventListener('abort', onAbort); });
+  });
 }
 
 export class ConnectionService {
@@ -178,7 +203,7 @@ export class ConnectionService {
         const r = await this.d.db.c.connections.updateOne(
           { _id: id, orgId: scope.orgId, configVersion: c.configVersion },
           {
-            $set: { ...set, ...(configChanged ? { discovered: null, selection: null, capabilities: [], 'health.state': 'pending' as ConnectionHealthState, ...(c.lifecycle === 'active' ? { 'health.nextCheckAt': this.now() } : {}) } : {}) },
+            $set: { ...set, ...(configChanged ? { discovered: null, selection: null, capabilities: [], 'health.state': 'pending' as ConnectionHealthState, ...(c.lifecycle === 'active' ? { 'health.nextCheckAt': this.now(), ...(c.collection.status === 'running' || c.collection.status === 'stopped' || c.collection.status === 'not_started' ? { 'collection.status': 'not_selected' } : {}) } : {}) } : {}) },
             ...(configChanged ? { $inc: { configVersion: 1 } } : {}),
           }, { session },
         );
@@ -218,7 +243,7 @@ export class ConnectionService {
   }
 
   /** Runs connector.test with a deadline; never throws for expected failures; scrubs the exact secret values from the result. */
-  private async runTest(c: ConnectionDoc): Promise<TestReport> {
+  private async runTest(c: ConnectionDoc, signal?: AbortSignal): Promise<TestReport> {
     const started = Date.now();
     const fail = (e: ConnectorError, secrets: string[] = []): TestReport => ({
       ok: false, steps: [], capabilities: [], facts: {}, durationMs: Date.now() - started,
@@ -226,9 +251,9 @@ export class ConnectionService {
     });
     let prepared;
     try { prepared = await this.prepare(c); } catch (e) { return fail(toConnectorError(e)); }
-    const dl = withDeadline(undefined, this.d.testTimeoutMs ?? 30_000);
+    const dl = withDeadline(signal, this.d.testTimeoutMs ?? 30_000);
     try {
-      const report = await prepared.connector.test(this.context(dl.signal), prepared.config, prepared.creds);
+      const report = await raceDeadline(dl, prepared.connector.test(this.context(dl.signal), prepared.config, prepared.creds), this.d.abortGraceMs ?? 1_000);
       return mapStrings(report, (s) => scrubKnownSecrets(s, prepared.secretValues));
     } catch (e) {
       const err = dl.timedOut() ? new ConnectorError('timeout', 'The check exceeded its time limit') : toConnectorError(e);
@@ -357,15 +382,16 @@ export class ConnectionService {
     const warnings = [
       ...(c.lastTest?.steps.filter((s) => s.status === 'warn').map((s) => `${s.label}: ${s.detail ?? ''}`) ?? []),
       ...(!c.lastTest || c.lastTest.configVersion !== c.configVersion ? ['The connection has not been tested since it was last changed.'] : []),
-      ...(descriptor.collection === 'not_implemented' ? ['Collection is not implemented for this connector yet: starting the connection enables health monitoring only; no telemetry will be collected.'] : []),
+      ...(descriptor.collection === 'not_implemented' ? ['Collection is not implemented for this connector: starting the connection enables health monitoring only; no telemetry will be collected.'] : []),
+      ...(descriptor.collection === 'implemented' && !(c.selection?.signals ?? []).includes('metrics') ? ['The metrics signal is not selected: the connection will be health-monitored, but no metrics will be collected.'] : []),
     ];
     return {
       connector: descriptor.displayName, authMethod: method?.label ?? c.authMethod, target: c.config,
       credentials: (method?.secretFields ?? []).map((f) => ({ field: f.label, set: f.name in c.secretFields })),
       resources: (c.discovered?.resources ?? []).filter((r) => chosen.has(r.id)).map((r) => ({ id: r.id, name: r.name, type: r.type })),
       signals: c.selection?.signals ?? [], settings,
-      schedule: `Health check every ${settings.pollIntervalSeconds}s (exponential backoff on failures, up to ${Math.round(15)} min)`,
-      collection: descriptor.collection === 'implemented' ? `Sampling ${Math.round(settings.sampling * 100)}%, retention ${settings.retentionDays} days` : 'Not collected (not implemented yet)',
+      schedule: `Health check${descriptor.collection === 'implemented' && (c.selection?.signals ?? []).includes('metrics') ? ' and metric collection' : ''} every ${settings.pollIntervalSeconds}s (exponential backoff on failures, up to ${Math.round(15)} min)`,
+      collection: descriptor.collection === 'implemented' ? ((c.selection?.signals ?? []).includes('metrics') ? `Read-only metric sampling, kept ${settings.retentionDays} days (the sampling setting does not apply to metrics)` : 'Nothing collected (metrics not selected)') : 'Not collected (not implemented for this connector)',
       warnings,
     };
   }
@@ -384,7 +410,7 @@ export class ConnectionService {
     const descriptor = this.d.registry.get(c.connectorType)!.descriptor;
     const r = await this.d.db.c.connections.findOneAndUpdate(
       { _id: id, orgId: scope.orgId, lifecycle: 'draft', configVersion: c.configVersion },
-      { $set: { lifecycle: 'active', activatedAt: now, updatedAt: now, 'health.nextCheckAt': new Date(now.getTime() + interval), collection: { status: descriptor.collection === 'implemented' ? 'not_started' : 'not_implemented', lastSuccessfulCollectionAt: null } } },
+      { $set: { lifecycle: 'active', activatedAt: now, updatedAt: now, 'health.nextCheckAt': new Date(now.getTime() + interval), collection: { status: descriptor.collection !== 'implemented' ? 'not_implemented' : c.selection!.signals.includes('metrics') ? 'not_started' : 'not_selected', lastSuccessfulCollectionAt: null, lastAttemptAt: null, consecutiveFailures: 0, lastError: null, lastSeries: null, lastNotes: [] } } },
       { returnDocument: 'after' },
     );
     if (!r) throw new ServiceError(409, 'connection_changed', 'The connection changed; review and try again');
@@ -469,8 +495,17 @@ export class ConnectionService {
 
   // ------------------------------------------------------------------ monitoring (used by the worker)
 
+  /**
+   * How long a claimed connection is reserved for one worker. It must outlast everything a run can legitimately take (the health check and then the
+   * collection, each with its own deadline) plus a margin; otherwise a slow run's lease expires while it is still working and a second worker starts the same run.
+   */
+  leaseMs(): number {
+    const test = this.d.testTimeoutMs ?? 30_000;
+    return Math.max(120_000, test + (this.d.collectTimeoutMs ?? test) + 30_000);
+  }
+
   /** Atomically leases up to `limit` due connections so that several workers never check the same one concurrently. */
-  async claimDue(owner: string, limit: number, leaseMs = 120_000): Promise<ConnectionDoc[]> {
+  async claimDue(owner: string, limit: number, leaseMs = this.leaseMs()): Promise<ConnectionDoc[]> {
     const out: ConnectionDoc[] = [];
     for (let i = 0; i < limit; i++) {
       const now = this.now();
@@ -485,13 +520,86 @@ export class ConnectionService {
     return out;
   }
 
+  // ------------------------------------------------------------------ metric collection (inside the same lease as the health check)
+
+  private collects(c: ConnectionDoc): boolean {
+    return !!this.d.sink && this.d.registry.get(c.connectorType)?.descriptor.collection === 'implemented' && !!this.d.registry.runnable(c.connectorType)?.collect
+      && !!c.selection?.signals.includes('metrics');
+  }
+
+  /** Runs after the health check, only when the connector can collect, the user selected metrics, and the target answered the check. Never throws. */
+  private async collectIfEnabled(c: ConnectionDoc, owner: string, signal?: AbortSignal): Promise<void> {
+    if (!this.collects(c)) return;
+    try {
+      // "unhealthy" = the target answers but reports a problem (e.g. one member of a replica set is down). The connector's own collection is built for
+      // partial results, so it still runs: losing the surviving members' metrics while one member is down would hide exactly what an operator needs.
+      const reachable = c.health.state === 'healthy' || (c.health.state === 'degraded' && c.health.lastError?.kind === 'unhealthy');
+      if (!reachable) {
+        // The check just failed for the same reason a collection would: say so instead of silently stopping.
+        if (c.collection.status === 'running') await this.d.db.c.connections.updateOne({ _id: c._id, orgId: c.orgId, lifecycle: 'active' }, { $set: { 'collection.status': 'stopped' } });
+        return;
+      }
+      await this.runCollection(c, owner, signal);
+    } catch { /* collection must never break the monitor loop */ }
+  }
+
+  private async runCollection(c: ConnectionDoc, owner: string, signal?: AbortSignal): Promise<void> {
+    const connector = this.connector(c.connectorType);
+    const started = this.now();
+    const interval = (c.settings?.pollIntervalSeconds ?? DEFAULT_INTERVAL_S) * 1000;
+    const fail = async (e: ConnectorError, secrets: string[] = []) => {
+      // Shutting down is not a failure of the target: record nothing, so no back-off and no "stopped" status for something that merely was interrupted.
+      if (signal?.aborted) return;
+      const failures = (c.collection.consecutiveFailures ?? 0) + 1;
+      const err = { at: started, kind: e.kind, message: scrubKnownSecrets(clip(e.message), secrets), remediation: e.remediation ?? REMEDIATION[e.kind] };
+      // Back off like a failing health check so a broken collection does not hammer the target.
+      const retry = new Date(started.getTime() + nextCheckDelay(failures, { intervalMs: interval, maxBackoffMs: MAX_BACKOFF_MS }, e.retryAfterMs));
+      await this.d.db.c.connections.updateOne({ _id: c._id, orgId: c.orgId, lifecycle: 'active' }, {
+        $set: { 'collection.status': 'stopped', 'collection.lastAttemptAt': started, 'collection.consecutiveFailures': failures, 'collection.lastError': err },
+        $max: { 'health.nextCheckAt': retry },
+      });
+    };
+    let prepared;
+    try { prepared = await this.prepare(c); } catch (e) { return fail(toConnectorError(e)); }
+    const dl = withDeadline(signal, this.d.collectTimeoutMs ?? this.d.testTimeoutMs ?? 30_000);
+    try {
+      const result = await raceDeadline(dl, connector.collect!(this.context(dl.signal), prepared.config, prepared.creds, { resourceIds: c.selection!.resourceIds, signals: c.selection!.signals as never }), this.d.abortGraceMs ?? 1_000);
+      // The series cap is enforced here as well, whatever the connector did: a buggy connector must not be able to flood the metric store.
+      const capped = capSeries(result.samples);
+      const clean = mapStrings({ ...result, samples: capped.samples, dropped: result.dropped + capped.dropped }, (s) => scrubKnownSecrets(s, prepared.secretValues));
+      const retentionMs = (c.settings?.retentionDays ?? 30) * 86_400_000;
+      // Still ours? A run that outlived its lease (a stalled process that woke up) must not write: another worker owns this connection now and may have
+      // written newer readings. Holding the lease is also renewed here, so the write and the status update below happen under a fresh lease.
+      if (signal?.aborted) return;
+      const held = await this.d.db.c.connections.findOneAndUpdate({ _id: c._id, 'lease.owner': owner, 'lease.until': { $gt: this.now() } }, { $set: { 'lease.until': new Date(this.now().getTime() + this.leaseMs()) } });
+      if (!held) return;
+      const written = await this.d.sink!.write({ orgId: c.orgId, projectId: c.projectId, environmentId: c.environmentId, retentionMs }, { connectionId: c._id, connectionName: c.name, connectorType: c.connectorType, samples: clean.samples }, started);
+      const notes = [
+        ...clean.notes.map(clip),
+        ...(clean.dropped > 0 ? [`${clean.dropped} series were dropped: a connection may produce at most 500 series. Select fewer members or databases.`] : []),
+        ...(written.rejected > 0 ? [`${written.rejected} points were refused by the metric store (${written.notes.join('; ') || 'cardinality limit'}).`] : []),
+      ].slice(0, 6);
+      await this.d.db.c.connections.updateOne({ _id: c._id, orgId: c.orgId, lifecycle: 'active' }, {
+        $set: {
+          'collection.status': 'running', 'collection.lastSuccessfulCollectionAt': started, 'collection.lastAttemptAt': started, 'collection.consecutiveFailures': 0,
+          'collection.lastError': null, 'collection.lastSeries': clean.samples.length, 'collection.lastNotes': notes, 'health.collectionLagSeconds': 0,
+        },
+      });
+    } catch (e) {
+      await fail(dl.timedOut() ? new ConnectorError('timeout', 'The collection exceeded its time limit') : toConnectorError(e), prepared.secretValues);
+    } finally { dl.dispose(); }
+  }
+
   /** One scheduled health check for a leased connection. Never throws; the lease is always released. */
-  async runMonitorCheck(c0: ConnectionDoc, owner: string): Promise<ConnectionDoc['health']['state']> {
+  async runMonitorCheck(c0: ConnectionDoc, owner: string, signal?: AbortSignal): Promise<ConnectionDoc['health']['state']> {
     const actor: Actor = { userId: null, ctx: { requestId: `worker:${owner}` } };
     try {
-      const report = await this.runTest(c0);
+      const report = await this.runTest(c0, signal);
+      // Interrupted by shutdown: nothing is recorded (an interrupted check says nothing about the target); the lease is released below, so another worker picks it up at once.
+      if (signal?.aborted) return c0.health.state;
       const c = await this.persistTest(c0, report, { scheduled: true });
       try { await this.auditHealthChange(c0, c, actor); } catch { /* auditing must not break monitoring */ }
+      await this.collectIfEnabled(c, owner, signal);
       return c.health.state;
     } catch {
       // e.g. configuration changed mid-run: just retry soon

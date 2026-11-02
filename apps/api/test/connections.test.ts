@@ -62,8 +62,9 @@ describe('connector registry endpoint', () => {
     const byType = Object.fromEntries(res.json.map((d: any) => [d.type, d]));
     expect(['http-health', 'mongodb', 'redis'].every((t) => byType[t].status === 'implemented')).toBe(true);
     expect(byType['aws-cloudwatch'].status).toBe('planned');
-    // pull connectors only verify/monitor; the push (ingestion) sources are the only ones that deliver telemetry
-    expect(res.json.filter((d: any) => d.collection === 'implemented').map((d: any) => d.type).sort()).toEqual(['json-logs', 'otlp']);
+    // push (ingestion) sources deliver telemetry; of the pull connectors only the database ones sample metrics; the health check only monitors
+    expect(res.json.filter((d: any) => d.collection === 'implemented').map((d: any) => d.type).sort()).toEqual(['json-logs', 'mongodb', 'otlp', 'redis']);
+    expect(byType['http-health'].collection).toBe('not_implemented');
     expect(res.json.filter((d: any) => d.mode === 'push').every((d: any) => d.status === 'implemented')).toBe(true);
     expect(byType.mongodb.leastPrivilegeGuide).toMatch(/clusterMonitor/);
   });
@@ -242,7 +243,6 @@ describe('input validation and SSRF through the API', () => {
   });
 });
 
-describe('secret hygiene across every response', () => {
 describe('mongodb+srv helper (connection form)', () => {
   const url = () => `${base()}/connectors/mongodb/resolve-srv`;
   test('only people who can manage connections may use it; other tenants cannot see the project', async () => {
@@ -261,6 +261,7 @@ describe('mongodb+srv helper (connection form)', () => {
   });
 });
 
+describe('secret hygiene across every response', () => {
   test('no response body anywhere contained a credential', () => {
     expect(bodies.length).toBeGreaterThan(40);
     for (const b of bodies) {

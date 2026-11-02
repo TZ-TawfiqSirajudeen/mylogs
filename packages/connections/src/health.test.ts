@@ -90,3 +90,17 @@ describe('isStale', () => {
     expect(isStale({ ...active(null), lifecycle: 'disconnected' }, now)).toBe(false);
   });
 });
+
+describe('applyReport: a target that answers but reports a problem', () => {
+  test('"unhealthy" (e.g. one replica-set member down) keeps the normal polling interval instead of backing off, so monitoring and collection continue at full rate', () => {
+    let h = initialHealth();
+    for (let i = 0; i < 6; i++) h = applyReport(h, bad('unhealthy'), now, opts);
+    expect(h.state).toBe('degraded');
+    expect(h.consecutiveFailures).toBe(6);
+    expect(h.nextCheckAt!.getTime() - now.getTime()).toBe(60_000);
+    // while a target that does not answer still backs off
+    let u = initialHealth();
+    for (let i = 0; i < 6; i++) u = applyReport(u, bad('unreachable'), now, opts);
+    expect(u.nextCheckAt!.getTime() - now.getTime()).toBeGreaterThan(5 * 60_000);
+  });
+});
