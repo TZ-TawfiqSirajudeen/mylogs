@@ -10,7 +10,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@hookform/resolvers": "^6.0.1",
+    "@hookform/resolvers": "^6.0.2",
     "@nexus/contracts": "workspace:*",
     "@tanstack/react-query": "^5.105.0",
     "@tanstack/react-virtual": "^3.14.23",
