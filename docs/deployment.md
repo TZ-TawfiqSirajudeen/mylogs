@@ -9,10 +9,10 @@
 | Service | Image target | Port | Purpose | Depends on |
 |---|---|---|---|---|
 | `api` | `--target api` | 4000 | REST API, sessions, OIDC callback | MongoDB, (IdP) |
-| `ingest` | `--target ingest` | 4318 | OTLP/HTTP + JSON log ingestion (token auth) | MongoDB |
+| `ingest` | `--target ingest` | 4318 | OTLP/HTTP **logs, traces and metrics** (`/v1/logs`, `/v1/traces`, `/v1/metrics`) + JSON log ingestion (token auth; OTLP/gRPC is not supported) | MongoDB |
 | `worker` | `--target worker` | 4100 (health) | connection health monitoring | MongoDB |
 | `web` | `--target web` | 8080 | static UI + same-origin `/api` proxy (nginx, unprivileged) | `api` |
-| MongoDB 7 | external | 27017 | metadata **and** log storage (behind the `LogStore` interface) | replica set required (transactions) |
+| MongoDB 7 | external | 27017 | metadata, logs, spans and metrics (behind the `LogStore`, `TraceStore` and `MetricStore` interfaces; ADR-0005) | replica set required (transactions) |
 | `mock-idp` | `--target mock-idp` | 9000 | **development only** test identity provider | — |
 
 `ingest` is separate from `api` on purpose: telemetry senders authenticate with per-environment tokens and must keep working regardless of how
@@ -48,6 +48,11 @@ Without Docker, see the README ("Local development") — every service runs dire
 * `SECRETS_KEYS` is set, `NETWORK_ALLOW_LOOPBACK` is off, `OIDC_ALLOW_INSECURE_ISSUER` is off, JIT provisioning (if used) has an org and a domain allow-list.
 * `INGEST_PUBLIC_URL` should be the public https URL of the ingest service (it is only shown to users in the setup UI).
 
+**Ingestion service tuning** (all optional; defaults in `.env.example` and `apps/ingest/src/server.ts`): `INGEST_PORT`/`INGEST_HOST`, `INGEST_MAX_BODY_BYTES` (4 MiB),
+`INGEST_MAX_RECORDS_PER_REQUEST` (5,000 log records, spans or data points per request), `INGEST_TOKEN_RECORDS_PER_MINUTE`, `INGEST_PROJECT_RECORDS_PER_MINUTE`,
+`INGEST_MAX_INFLIGHT_WRITES`, `INGEST_MAX_QUEUED_WRITES`, and the metric cardinality limits `METRIC_MAX_SERIES_PER_METRIC` (2,000) and `METRIC_MAX_SERIES_PER_ENVIRONMENT`
+(20,000). Rate limits are per process. Traces and metrics need no extra services: spans and metric points are stored in the same MongoDB.
+
 **Network**
 * Terminate TLS in front of `web` and `ingest` (load balancer/ingress). The nginx image listens on plain HTTP :8080 and trusts nothing from the client.
 * `trustProxy` is **off** in the API (see STATUS "known limitations"): per-IP rate limits and audit IPs see the proxy's address until you enable it deliberately.
@@ -58,8 +63,13 @@ Without Docker, see the README ("Local development") — every service runs dire
 **Data**
 * MongoDB must be a replica set. Run migrations as a deploy step with a privileged user (they take a lock, so several replicas starting at once is safe).
   **Migration v5 backfills a field on every existing log record** — schedule it for a quiet period on a large collection (`docs/performance.md`).
+  **Migration v6** (Phase 4) only creates the span, trace-summary, metric and service collections and their indexes; it does not touch existing data.
+* The platform creates about 23 collections (the 22 defined in `packages/database/src/models.ts`, including `audit_events`, plus `schema_migrations`; the list is in
+  `docs/runbooks/mongodb-roles.md`; later phases may add more). A hosted cluster with a collection cap (for example MongoDB Atlas free tiers) must have room for them:
+  [runbooks/atlas.md](runbooks/atlas.md).
 * Back up with the dedicated `backup` role; back the KEK up separately.
-* Retention is per ingestion token and enforced by MongoDB TTL indexes.
+* Retention is per ingestion token and enforced by MongoDB TTL indexes (logs, spans, trace summaries and metric points).
+* Spans and metrics are stored in MongoDB, which is not a columnar store: see [performance-traces-metrics.md](performance-traces-metrics.md) for measured limits before sizing.
 
 **Identity provider** — `docs/auth-oidc.md` (registration steps for Microsoft Entra ID and generic OIDC providers).
 

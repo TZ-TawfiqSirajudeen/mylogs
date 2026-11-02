@@ -52,7 +52,7 @@ One row per service per environment, written on ingest from valid `service.name`
 
 `scope` = `(orgId, projectId, environmentId)`. Every query starts with the caller's scope; an `environmentIds` filter can only narrow it.
 
-## 3. API (all under `/api/v1/projects/:projectId`, session + CSRF for POST, `telemetry:read` required)
+## 3. API (paths below are under `/api/v1/projects/:projectId` unless stated; session + CSRF for POST; `telemetry:read` required)
 | Endpoint | Purpose |
 |---|---|
 | `POST /traces/search` | validated query builder: trace id, services, span name, errors / ok only, min/max duration, HTTP status/method/route, db system, exception type, environments, sort recent/slowest, limit ≤ 200, keyset cursor; time range ≤ 31 days |
@@ -64,7 +64,7 @@ One row per service per environment, written on ingest from valid `service.name`
 | `GET /metrics/names`, `GET /metrics/labels?metric=` | catalogue |
 | `POST /metrics/query` | bounded query (metric, service, ≤ 5 exact label filters, ≤ 2 group-by keys, aggregation by type, step ≥ 60 s) |
 | `GET /telemetry/diagnostics` | per-signal ingestion counters (accepted/duplicates/refused by reason), storage counts, metric cardinality vs limits, query timings and failures of this API process |
-| `GET /telemetry/endpoints` | where to send OTLP |
+| `GET /api/v1/telemetry/endpoints` (not project-scoped) | where to send OTLP (the ingestion URLs for logs, traces and metrics) |
 
 Authorization is enforced **on the server for every call**: project RBAC → the exact environments the caller may read → every query filtered to them. A trace the caller may not see and a trace that
 does not exist are both `404` with the same message. Cache entries (10 s, in process) are keyed by the authorized scope (organization, project, sorted environment set) plus the request, so a result
@@ -75,7 +75,10 @@ Metric query protections: time range ≤ 31 days, ≤ 400 points per series (the
 
 ## 4. Retention and operations
 * Retention is set per ingestion token (1–90 days) and applies to spans, trace summaries and metric points through TTL indexes.
-* Roles: the MongoDB role in [runbooks/mongodb-roles.md](runbooks/mongodb-roles.md) lists the new collections (a test fails if the list and the code disagree).
-* Watch `GET /telemetry/diagnostics` and the ingestion service's `/metrics` (`nexus_ingest_spans_*`, `nexus_ingest_datapoints_*`, `nexus_ingest_metric_datapoints_unsupported_total`).
+* Roles: the MongoDB role in [runbooks/mongodb-roles.md](runbooks/mongodb-roles.md) lists the new collections (a test, `packages/database/src/roles.test.ts`, fails if the list and the code disagree).
+* Watch `GET /telemetry/diagnostics` and the ingestion service's `/metrics`: `nexus_ingest_spans_*` (traces), `nexus_ingest_datapoints_*` (metrics) and `nexus_ingest_metric_datapoints_unsupported_total`;
+  the older `nexus_ingest_records_*` counters are the **logs** pipeline. Each signal has its own bounded write gate (`INGEST_MAX_INFLIGHT_WRITES` / `INGEST_MAX_QUEUED_WRITES` apply to each), so a storage problem in one signal is reported as that signal's `*_rejected_storage_total`.
+* Cardinality limits are settings of the ingestion service: `METRIC_MAX_SERIES_PER_METRIC` (default 2,000) and `METRIC_MAX_SERIES_PER_ENVIRONMENT` (default 20,000).
+* The span and metric storage cost is measured in [performance-traces-metrics.md](performance-traces-metrics.md) (about 180 bytes of data and about 290 bytes of index per span on this hardware); aggregate queries scan a time range and grow with the window and the number of series.
 * Deleting a project's telemetry on demand is **not** implemented (retention only).
 * Migration v6 creates collections and indexes only; it does not touch existing data.

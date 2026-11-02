@@ -1,7 +1,7 @@
 # Nexus Observability
 
 Unified observability console (work in progress). See [docs/STATUS.md](docs/STATUS.md) for exactly what works and what does not, the
-[capability matrix](docs/integrations/capability-matrix.md), [performance results](docs/performance.md), and the decision records in
+[capability matrix](docs/integrations/capability-matrix.md), performance results for [logs](docs/performance.md) and for [traces and metrics](docs/performance-traces-metrics.md), and the decision records in
 [docs/architecture/](docs/architecture/).
 
 ## What works today
@@ -15,18 +15,29 @@ Incidents, alerting, deployments and AI are not built yet. See [docs/traces-metr
 
 ## Local development (no Docker needed)
 
-```bash
-pnpm install
-pnpm dev:mongo     # terminal 1: local MongoDB replica set on :27017 (data in packages/database/.mongo-data)
+Settings live in a **gitignored `.env` file in the repository root** (copy [.env.example](.env.example); never commit real values). The `dev` scripts of the API, the ingestion
+service and the worker read it automatically (`tsx watch --env-file-if-exists=../../.env`); variables already set in your shell win over the file. **Production starts
+(`node dist/server.js`) never read `.env`**: production secrets come from the platform. Minimum local `.env`:
 
-export MONGODB_URI="mongodb://127.0.0.1:27017/?replicaSet=testset" NETWORK_ALLOW_LOOPBACK=true
-pnpm --filter @nexus/api exec tsx src/server.ts --seed          # terminal 2: API + DEMO users/orgs  (:4000)
-pnpm --filter @nexus/ingest-service exec tsx src/server.ts      # terminal 3: ingestion service      (:4318)
-pnpm --filter @nexus/worker exec tsx src/main.ts                # terminal 4: connection monitor     (:4100)
-pnpm dev:web                                                    # terminal 5: http://localhost:5173
+```bash
+NODE_ENV=development
+MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=testset     # the database started by `pnpm dev:mongo`
+MONGODB_DB=nexus
+NETWORK_ALLOW_LOOPBACK=true                                    # lets connectors reach services on this machine (development only; refused in production)
 ```
 
-Sign in (dev auth mode only; for single sign-on see [docs/auth-oidc.md](docs/auth-oidc.md) — `pnpm dev:idp` starts a mock provider) as `owner@acme.test`, create a project, then **Data Sources → Ingestion → Create token**. Send logs with the sample app:
+```bash
+pnpm install
+pnpm dev:mongo     # terminal 1: local MongoDB replica set on :27017 (data in packages/database/.mongo-data); start it first
+pnpm --filter @nexus/api dev --seed          # terminal 2: API + DEMO users/orgs  (:4000)
+pnpm dev:ingest                              # terminal 3: ingestion service      (:4318)
+pnpm --filter @nexus/worker dev              # terminal 4: connection monitor     (:4100)   (optional unless you use data source connections)
+pnpm dev:web                                 # terminal 5: http://localhost:5173  (open it as localhost, not 127.0.0.1)
+```
+(`pnpm dev:api` is the same API without `--seed`; the API, ingest and worker must all use the same `MONGODB_URI` and `MONGODB_DB`.) A hosted cluster such as MongoDB Atlas
+needs room for the platform's collections and an IP allow-list entry: see [docs/runbooks/atlas.md](docs/runbooks/atlas.md).
+
+Sign in (dev auth mode only; for single sign-on see [docs/auth-oidc.md](docs/auth-oidc.md) — `pnpm dev:idp` starts a mock provider) as `owner@acme.test`, create a project, then **Data Sources → Ingestion → Create token**. To monitor a database, use **Data Sources → Add data source → MongoDB**: you can paste a `mongodb://` or `mongodb+srv://` connection string into the "Connection string" box (read in the browser; for `+srv` only the cluster's DNS name goes to the server), and it fills hosts, user, auth database and TLS, with the password going to the write-only credential field. A connected MongoDB/Redis source is verified and health-monitored; see [docs/STATUS.md](docs/STATUS.md) ("Phase 5") for whether it collects data yet. Send logs with the sample app:
 
 ```bash
 OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:4318/v1/logs \
@@ -49,12 +60,12 @@ API docs: http://localhost:4000/docs (non-production only). Metrics/health: inge
 
 ```bash
 pnpm test         # unit/integration tests, one package at a time (throwaway mongod replica sets; Redis tests use `redis-server` if installed)
-pnpm e2e          # browser automation with system Chrome (starts the whole stack, incl. an OIDC variant + mock IdP; ~7 min)
+pnpm e2e          # browser automation with system Chrome (starts the whole stack, incl. an OIDC variant + mock IdP; about 10 minutes)
                   # OTELCOL_BIN=<path to otelcol-contrib> pnpm e2e   also runs the real-Collector specs (otherwise they are skipped)
 node infra/scripts/prod-smoke.mjs   # after `pnpm build`: runs the built bundles with NODE_ENV=production and checks the guard-rails
 pnpm typecheck
 pnpm bench        # log ingestion/query benchmark -> docs/performance-results.json
-pnpm --filter @nexus/ingest bench:signals   # trace + metric benchmark -> docs/performance-traces-metrics.json
+pnpm --filter @nexus/ingest bench:signals   # trace + metric benchmark -> docs/performance-traces-metrics.json (results and limits: docs/performance-traces-metrics.md)
 pnpm --filter @nexus/connectors matrix   # regenerate docs/integrations/capability-matrix.md
 ```
 
