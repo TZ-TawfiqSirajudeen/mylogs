@@ -22,7 +22,11 @@ export interface MockUser {
 
 export type Tamper =
   | 'none' | 'signature' | 'nonce' | 'audience' | 'issuer' | 'expired' | 'not-yet-valid' | 'missing-sub' | 'missing-nonce'
-  | 'alg-none' | 'wrong-azp' | 'no-id-token';
+  | 'alg-none' | 'wrong-azp' | 'no-id-token'
+  /** HS256 signed with the CLIENT SECRET as the HMAC key (the classic key-confusion attempt). */
+  | 'hs256-client-secret'
+  /** Header says PS256 while the published key is restricted to RS256. */
+  | 'alg-mismatch';
 
 export interface Behavior {
   tamper: Tamper;
@@ -34,6 +38,31 @@ export interface Behavior {
   wrongIssParam: boolean;
   /** Return a different `state` than the one received. */
   wrongState: boolean;
+  // ---- real-provider quirks: every one of these defaults to "off" (undefined) ----
+  /** Seconds from now for `exp` / `iat` / `nbf` (negative = in the past). Used for clock-skew boundary tests. */
+  expOffset?: number | undefined;
+  iatOffset?: number | undefined;
+  nbfOffset?: number | undefined;
+  /** `aud` as an array `[clientId, "api://other-resource"]` with `azp` = clientId (Microsoft/Google style multi-audience tokens). */
+  audArray?: boolean | undefined;
+  /** Put this value in the ID token `iss` (e.g. a v1.0-style issuer while the provider is configured as v2.0). */
+  issClaim?: string | undefined;
+  /** Put this value in the discovery document `issuer` (e.g. the literal `{tenantid}` template served for Entra /common). */
+  discoveryIssuer?: string | undefined;
+  /** Answer /authorize with this error code (e.g. login_required, interaction_required, temporarily_unavailable). */
+  authorizeError?: string | undefined;
+  /** Leave the RFC 9207 `iss` parameter out of authorization responses. */
+  omitIssParam?: boolean | undefined;
+  /** JWKS endpoint answers with this HTTP status instead of the key set. */
+  jwksStatus?: number | undefined;
+  /** Milliseconds each endpoint waits before answering (hanging / slow provider). */
+  jwksDelayMs?: number | undefined;
+  discoveryDelayMs?: number | undefined;
+  tokenDelayMs?: number | undefined;
+  /** Token response oddities seen in the wild. */
+  tokenType?: string | undefined;
+  expiresInAsString?: boolean | undefined;
+  extraTokenFields?: Record<string, unknown> | undefined;
 }
 
 export interface MockIdpOptions {
@@ -43,16 +72,35 @@ export interface MockIdpOptions {
   redirectUris: string[];
   postLogoutRedirectUris?: string[];
   port?: number;
+  /** Interface to bind (default 127.0.0.1). */
   host?: string;
+  /** Origin advertised in the issuer and endpoints (default `http://<host>:<port>`). Needed when the bind address differs from the name clients use, e.g. a container. */
+  publicOrigin?: string;
   /** Lifetime of issued ID tokens in seconds. */
   idTokenTtl?: number;
+  /** Serve the provider under a path, e.g. `/<tenant-guid>/v2.0` (Microsoft Entra ID shape). Issuer = origin + path. */
+  issuerPath?: string;
+  /** Issuer identifier ends with `/` (Auth0 / some Okta authorization servers). */
+  issuerTrailingSlash?: boolean;
+  /** Do not advertise `end_session_endpoint` (several providers have none). */
+  omitEndSession?: boolean;
+  /** `false`: do not advertise or send the RFC 9207 `iss` response parameter (most providers do not). Default true. */
+  rfc9207?: boolean;
+  /** Restrict the client-authentication methods the token endpoint accepts and advertises (default: basic, post and none). */
+  tokenAuthMethods?: string[];
 }
 
 export interface AuthorizationRequestRecord { clientId: string; redirectUri: string; scope: string; state: string; nonce: string; codeChallenge: string; codeChallengeMethod: string; loginHint?: string }
 
 export interface MockIdp {
   issuer: string;
+  /** The origin only (scheme + host + port), regardless of any issuer path. */
   url: string;
+  /** Number of times the JWKS / discovery document was fetched since the last reset. */
+  jwksRequests: number;
+  discoveryRequests: number;
+  /** Publishes a new signing key and signs from now on with it; the old key is withdrawn unless `keepOld`. */
+  rotateKey(opts?: { keepOld?: boolean }): Promise<void>;
   /** Every authorization request received (for asserting PKCE/state/nonce/redirect_uri). */
   authorizationRequests: AuthorizationRequestRecord[];
   tokenRequests: { grantType: string; hasVerifier: boolean; authMethod: string }[];
@@ -73,8 +121,12 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
   const users = new Map(opts.users.map((u) => [u.sub, u]));
   const { privateKey, publicKey } = await generateKeyPair('RS256', { extractable: true });
   const other = await generateKeyPair('RS256', { extractable: true }); // used to forge signatures
-  const kid = `mock-${randomBytes(4).toString('hex')}`;
-  const jwk: JWK = { ...(await exportJWK(publicKey)), kid, alg: 'RS256', use: 'sig' };
+  let kid = `mock-${randomBytes(4).toString('hex')}`;
+  let signingKey: CryptoKey = privateKey as CryptoKey;
+  let published: JWK[] = [{ ...(await exportJWK(publicKey)), kid, alg: 'RS256', use: 'sig' }];
+  const counters = { jwks: 0, discovery: 0 };
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  let psKey: CryptoKey | null = null;
   const codes = new Map<string, AuthorizationRequestRecord & { sub: string; used: boolean; exp: number }>();
   const pending = new Map<string, AuthorizationRequestRecord>();
   const state = { behavior: { ...DEFAULT_BEHAVIOR } };
@@ -84,6 +136,8 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
     logoutRequests: [] as string[],
   };
   let issuer = '';
+  let base = ''; // endpoints live under this (the issuer without a trailing slash)
+  let prefix = ''; // path the whole provider is served under
 
   const send = (res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
     const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -98,22 +152,29 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
   };
 
   async function issueIdToken(rec: AuthorizationRequestRecord & { sub: string }): Promise<string> {
-    const t = state.behavior.tamper;
+    const b = state.behavior;
+    const t = b.tamper;
     const user = users.get(rec.sub)!;
     const now = Math.floor(Date.now() / 1000);
     const ttl = opts.idTokenTtl ?? 300;
+    let iat = now + (b.iatOffset ?? 0);
+    let exp = b.expOffset !== undefined ? now + b.expOffset : iat + ttl;
+    if (t === 'expired') { iat = now - 7200; exp = now - 3600; }
     const claims: Record<string, unknown> = {
       ...user.claims, nonce: t === 'nonce' ? 'not-the-nonce' : t === 'missing-nonce' ? undefined : rec.nonce,
       auth_time: now, ...(user.email ? { email: user.email } : {}), ...(user.emailVerified !== undefined ? { email_verified: user.emailVerified } : {}),
       ...(user.name ? { name: user.name } : {}), ...(user.groups ? { groups: user.groups } : {}),
+      ...(b.audArray ? { azp: opts.clientId } : {}),
       ...(t === 'wrong-azp' ? { azp: 'some-other-client' } : {}),
     };
+    const alg = t === 'hs256-client-secret' ? 'HS256' : t === 'alg-mismatch' ? 'PS256' : 'RS256';
     let jwt = new SignJWT(claims)
-      .setProtectedHeader({ alg: 'RS256', kid })
-      .setIssuer(t === 'issuer' ? 'https://evil.example' : issuer)
-      .setAudience(t === 'audience' ? 'another-client' : opts.clientId)
-      .setIssuedAt(t === 'expired' ? now - 7200 : now)
-      .setExpirationTime(t === 'expired' ? now - 3600 : now + ttl);
+      .setProtectedHeader({ alg, kid })
+      .setIssuer(t === 'issuer' ? 'https://evil.example' : b.issClaim ?? issuer)
+      .setAudience(t === 'audience' ? 'another-client' : b.audArray ? [opts.clientId, 'api://other-resource'] : opts.clientId)
+      .setIssuedAt(iat)
+      .setExpirationTime(exp);
+    if (b.nbfOffset !== undefined) jwt = jwt.setNotBefore(now + b.nbfOffset);
     if (t !== 'missing-sub') jwt = jwt.setSubject(rec.sub);
     if (t === 'not-yet-valid') jwt = jwt.setNotBefore(now + 3600).setIssuedAt(now + 3600).setExpirationTime(now + 7200);
     if (t === 'alg-none') {
@@ -121,22 +182,39 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
       const payload = b64url(Buffer.from(JSON.stringify({ iss: issuer, sub: rec.sub, aud: opts.clientId, exp: now + ttl, iat: now, nonce: rec.nonce, email: user.email, email_verified: true })));
       return `${header}.${payload}.`;
     }
-    return jwt.sign(t === 'signature' ? (other.privateKey as CryptoKey) : (privateKey as CryptoKey));
+    if (t === 'hs256-client-secret') return jwt.sign(new TextEncoder().encode(opts.clientSecret ?? 'secret'));
+    if (t === 'alg-mismatch') { psKey ??= (await generateKeyPair('PS256')).privateKey as CryptoKey; return jwt.sign(psKey); }
+    return jwt.sign(t === 'signature' ? (other.privateKey as CryptoKey) : signingKey);
   }
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', issuer || 'http://localhost');
+    const raw = new URL(req.url ?? '/', base || 'http://localhost');
+    // When served under a path (issuerPath), only that subtree exists; everything inside it is routed by its relative path.
+    const inside = prefix === '' || raw.pathname === prefix || raw.pathname.startsWith(`${prefix}/`);
+    const url = new URL(raw.toString());
+    if (prefix !== '' && inside) url.pathname = raw.pathname.slice(prefix.length) || '/';
     try {
+      if (!inside) return send(res, 404, { error: 'not_found' });
+      const b = state.behavior;
       if (url.pathname === '/.well-known/openid-configuration') {
+        counters.discovery++;
+        if (b.discoveryDelayMs) await sleep(b.discoveryDelayMs);
         return send(res, 200, {
-          issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/jwks`, end_session_endpoint: `${issuer}/logout`,
+          issuer: b.discoveryIssuer ?? issuer, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, jwks_uri: `${base}/jwks`,
+          ...(opts.omitEndSession ? {} : { end_session_endpoint: `${base}/logout` }),
           response_types_supported: ['code'], subject_types_supported: ['public'], id_token_signing_alg_values_supported: ['RS256'],
           code_challenge_methods_supported: ['S256'], scopes_supported: ['openid', 'profile', 'email'], grant_types_supported: ['authorization_code'],
-          token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post', ...(opts.clientSecret ? [] : ['none'])],
-          authorization_response_iss_parameter_supported: true, claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'nonce', 'email', 'email_verified', 'name', 'groups'],
+          token_endpoint_auth_methods_supported: opts.tokenAuthMethods ?? ['client_secret_basic', 'client_secret_post', ...(opts.clientSecret ? [] : ['none'])],
+          ...(opts.rfc9207 === false ? {} : { authorization_response_iss_parameter_supported: true }),
+          claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'nonce', 'email', 'email_verified', 'name', 'groups'],
         });
       }
-      if (url.pathname === '/jwks') return send(res, 200, { keys: [jwk] });
+      if (url.pathname === '/jwks') {
+        counters.jwks++;
+        if (b.jwksDelayMs) await sleep(b.jwksDelayMs);
+        if (b.jwksStatus) return send(res, b.jwksStatus, { error: 'jwks_unavailable' });
+        return send(res, 200, { keys: published });
+      }
 
       if (url.pathname === '/authorize') {
         const q = url.searchParams;
@@ -148,13 +226,14 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
           codeChallenge: q.get('code_challenge') ?? '', codeChallengeMethod: q.get('code_challenge_method') ?? '', ...(q.get('login_hint') ? { loginHint: q.get('login_hint')! } : {}),
         };
         idp.authorizationRequests.push(rec);
-        const fail = (error: string, desc: string) => redirectWith(res, redirectUri, { error, error_description: desc, state: rec.state, iss: issuer });
+        const fail = (error: string, desc: string) => redirectWith(res, redirectUri, { error, error_description: desc, state: rec.state, ...issParam() });
         if (q.get('response_type') !== 'code') return fail('unsupported_response_type', 'only the code flow is supported');
         if (!rec.scope.split(' ').includes('openid')) return fail('invalid_scope', 'openid scope required');
         if (!rec.state) return fail('invalid_request', 'state required');
         if (!rec.nonce) return fail('invalid_request', 'nonce required');
         if (!rec.codeChallenge || rec.codeChallengeMethod !== 'S256') return fail('invalid_request', 'PKCE with S256 is required');
         if (state.behavior.denyAuthorize) return fail('access_denied', 'the user denied the request');
+        if (state.behavior.authorizeError) return fail(state.behavior.authorizeError, 'configured failure');
         const hint = rec.loginHint?.toLowerCase();
         const hinted = hint ? [...users.values()].find((u) => u.email?.toLowerCase() === hint || u.sub === rec.loginHint) : undefined;
         if (hinted) return approve(res, rec, hinted.sub);
@@ -173,7 +252,7 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
       if (url.pathname === '/authorize/deny') {
         const rec = pending.get(url.searchParams.get('sid') ?? '');
         if (!rec) return send(res, 400, '<h1>Unknown request</h1>');
-        return redirectWith(res, rec.redirectUri, { error: 'access_denied', state: rec.state, iss: issuer });
+        return redirectWith(res, rec.redirectUri, { error: 'access_denied', state: rec.state, ...issParam() });
       }
 
       if (url.pathname === '/token' && req.method === 'POST') {
@@ -186,7 +265,9 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
         if (basic) { const [a, ...b] = Buffer.from(basic[1]!, 'base64').toString().split(':'); id = decodeURIComponent(a ?? ''); secret = decodeURIComponent(b.join(':')); method = 'client_secret_basic'; }
         idp.tokenRequests.push({ grantType: p.get('grant_type') ?? '', hasVerifier: !!p.get('code_verifier'), authMethod: method });
         const err = (code: string, desc: string, status = 400) => send(res, status, { error: code, error_description: desc });
+        if (state.behavior.tokenDelayMs) await sleep(state.behavior.tokenDelayMs);
         if (state.behavior.tokenError) return err('server_error', 'configured failure', 500);
+        if (opts.tokenAuthMethods && !opts.tokenAuthMethods.includes(method)) return err('invalid_client', `authentication method ${method} is not supported`, 401);
         if (id !== opts.clientId || (opts.clientSecret && !safeEq(secret, opts.clientSecret))) return err('invalid_client', 'client authentication failed', 401);
         if (p.get('grant_type') !== 'authorization_code') return err('unsupported_grant_type', 'only authorization_code');
         const rec = codes.get(p.get('code') ?? '');
@@ -196,7 +277,10 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
         if (p.get('redirect_uri') !== rec.redirectUri) return err('invalid_grant', 'redirect_uri mismatch');
         const verifier = p.get('code_verifier') ?? '';
         if (!verifier || !safeEq(b64url(sha256(verifier)), rec.codeChallenge)) return err('invalid_grant', 'PKCE verification failed');
-        const body: Record<string, unknown> = { access_token: randomBytes(24).toString('base64url'), token_type: 'Bearer', expires_in: 300, scope: rec.scope };
+        const tb = state.behavior;
+        const body: Record<string, unknown> = {
+          access_token: randomBytes(24).toString('base64url'), token_type: tb.tokenType ?? 'Bearer', expires_in: tb.expiresInAsString ? '300' : 300, scope: rec.scope, ...tb.extraTokenFields,
+        };
         if (state.behavior.tamper !== 'no-id-token') body.id_token = await issueIdToken(rec);
         return send(res, 200, body);
       }
@@ -213,23 +297,40 @@ export async function startMockIdp(opts: MockIdpOptions): Promise<MockIdp> {
     }
   });
 
+  /** The RFC 9207 `iss` authorization-response parameter: sent by default, omitted for providers that do not support it. */
+  function issParam(): Record<string, string> {
+    if (opts.rfc9207 === false || state.behavior.omitIssParam) return {};
+    return { iss: state.behavior.wrongIssParam ? 'https://evil.example' : issuer };
+  }
+
   function approve(res: http.ServerResponse, rec: AuthorizationRequestRecord, sub: string) {
     const code = randomBytes(24).toString('base64url');
     codes.set(code, { ...rec, sub, used: false, exp: Date.now() + 60_000 });
-    redirectWith(res, rec.redirectUri, {
-      code, state: state.behavior.wrongState ? 'attacker-state' : rec.state, iss: state.behavior.wrongIssParam ? 'https://evil.example' : issuer,
-    });
+    redirectWith(res, rec.redirectUri, { code, state: state.behavior.wrongState ? 'attacker-state' : rec.state, ...issParam() });
   }
 
   await new Promise<void>((r) => server.listen(opts.port ?? 0, opts.host ?? '127.0.0.1', r));
   const port = (server.address() as AddressInfo).port;
-  issuer = `http://${opts.host ?? '127.0.0.1'}:${port}`;
+  const origin = (opts.publicOrigin ?? `http://${opts.host ?? '127.0.0.1'}:${port}`).replace(/\/+$/, '');
+  prefix = (opts.issuerPath ?? '').replace(/\/+$/, '');
+  if (prefix && !prefix.startsWith('/')) prefix = `/${prefix}`;
+  base = `${origin}${prefix}`;
+  issuer = opts.issuerTrailingSlash ? `${base}/` : base;
 
   return {
-    issuer, url: issuer, ...idp, authorizationRequests: idp.authorizationRequests, tokenRequests: idp.tokenRequests, logoutRequests: idp.logoutRequests,
+    issuer, url: origin, ...idp,
+    get jwksRequests() { return counters.jwks; },
+    get discoveryRequests() { return counters.discovery; },
+    async rotateKey(o) {
+      const next = await generateKeyPair('RS256', { extractable: true });
+      kid = `mock-${randomBytes(4).toString('hex')}`;
+      signingKey = next.privateKey as CryptoKey;
+      const fresh: JWK = { ...(await exportJWK(next.publicKey)), kid, alg: 'RS256', use: 'sig' };
+      published = o?.keepOld ? [...published, fresh] : [fresh];
+    }, authorizationRequests: idp.authorizationRequests, tokenRequests: idp.tokenRequests, logoutRequests: idp.logoutRequests,
     get behavior() { return state.behavior; },
     setBehavior(b) { state.behavior = { ...state.behavior, ...b }; },
-    reset() { state.behavior = { ...DEFAULT_BEHAVIOR }; idp.authorizationRequests.length = 0; idp.tokenRequests.length = 0; idp.logoutRequests.length = 0; codes.clear(); pending.clear(); },
+    reset() { state.behavior = { ...DEFAULT_BEHAVIOR }; idp.authorizationRequests.length = 0; idp.tokenRequests.length = 0; idp.logoutRequests.length = 0; codes.clear(); pending.clear(); counters.jwks = 0; counters.discovery = 0; },
     addUser(u) { users.set(u.sub, u); },
     close: () => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }),
   } as MockIdp;

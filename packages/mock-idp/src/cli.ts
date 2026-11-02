@@ -4,6 +4,9 @@ import { startMockIdp } from './index.js';
 const web = process.env.WEB_ORIGIN ?? 'http://localhost:5173';
 const idp = await startMockIdp({
   port: Number(process.env.MOCK_IDP_PORT ?? 9000),
+  // In a container: MOCK_IDP_HOST=0.0.0.0 and MOCK_IDP_PUBLIC_ORIGIN=http://mock-idp:9000 (the name the browser and the API use).
+  ...(process.env.MOCK_IDP_HOST ? { host: process.env.MOCK_IDP_HOST } : {}),
+  ...(process.env.MOCK_IDP_PUBLIC_ORIGIN ? { publicOrigin: process.env.MOCK_IDP_PUBLIC_ORIGIN } : {}),
   clientId: process.env.OIDC_CLIENT_ID ?? 'nexus-local',
   clientSecret: process.env.OIDC_CLIENT_SECRET ?? 'local-dev-secret-change-me',
   redirectUris: [`${web}/api/v1/auth/oidc/callback`],

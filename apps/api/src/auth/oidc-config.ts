@@ -41,7 +41,13 @@ export function parseOidcConfig(e: OidcEnv, ctx: { webOrigin: string; production
   const bad = (name: string, why?: string) => problems.push(why ? `${name} ${why}` : name);
 
   let issuer = '';
-  try { issuer = new URL(e.OIDC_ISSUER ?? '').toString().replace(/\/$/, ''); } catch { bad('OIDC_ISSUER', 'must be an absolute URL'); }
+  try {
+    const u = new URL(e.OIDC_ISSUER ?? '');
+    // The issuer is an exact string the provider puts in `iss` and in its discovery document. A bare origin is the same issuer with
+    // or without a trailing slash (URL normalisation), so it is stored without. A PATH is kept exactly as configured: providers such as
+    // Azure AD B2C, Authentik and Entra v1.0 publish `https://host/tenant/v2.0/` WITH the slash, and stripping it makes discovery fail.
+    issuer = u.pathname === '/' && !u.search && !u.hash ? u.origin : u.toString();
+  } catch { bad('OIDC_ISSUER', 'must be an absolute URL'); }
   if (!e.OIDC_CLIENT_ID?.trim()) bad('OIDC_CLIENT_ID', 'is required');
 
   let secret: string | null = e.OIDC_CLIENT_SECRET?.trim() || null;

@@ -35,6 +35,8 @@ test.describe('OIDC single sign-on', () => {
 
   test('the sign-in link is keyboard operable', async ({ page }) => {
     await page.goto(WEB());
+    // Tab only once the link exists: pressing it during the initial render (slow machine) lands on the document instead.
+    await expect(page.getByTestId('oidc-signin')).toBeVisible();
     await page.keyboard.press('Tab');
     await expect(page.getByTestId('oidc-signin')).toBeFocused();
     await page.keyboard.press('Enter');

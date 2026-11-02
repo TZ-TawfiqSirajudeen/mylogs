@@ -20,6 +20,8 @@ export type LoginResult =
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 export const FLOW_TTL_MS = 10 * 60_000;
+/** Upper bound for every HTTP call to the provider (discovery, token endpoint). The library default is 30 s, which would let a hanging provider hold sign-ins open. */
+export const IDP_HTTP_TIMEOUT_SECONDS = 10;
 
 /**
  * Only same-origin relative paths are accepted as a post-login destination. Anything that could leave the site
@@ -73,12 +75,23 @@ export class OidcService {
     if (!this.configPromise) {
       const p = (async () => {
         const url = new URL(this.oidc.issuer);
-        const auth = this.oidc.clientSecret ? client.ClientSecretBasic(this.oidc.clientSecret) : client.None();
-        const c = await Promise.race([
-          client.discovery(url, this.oidc.clientId, { [client.clockTolerance]: this.oidc.clockToleranceSeconds }, auth, this.oidc.allowInsecureIssuer ? { execute: [client.allowInsecureRequests] } : undefined),
-          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('discovery timed out')), 10_000).unref()),
+        const secret = this.oidc.clientSecret;
+        const metadata = { [client.clockTolerance]: this.oidc.clockToleranceSeconds };
+        const discovered = await Promise.race([
+          client.discovery(url, this.oidc.clientId, metadata, secret ? client.ClientSecretBasic(secret) : client.None(), { timeout: IDP_HTTP_TIMEOUT_SECONDS, ...(this.oidc.allowInsecureIssuer ? { execute: [client.allowInsecureRequests] } : {}) }),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('discovery timed out')), IDP_HTTP_TIMEOUT_SECONDS * 1000).unref()),
         ]);
-        return c;
+        discovered.timeout = IDP_HTTP_TIMEOUT_SECONDS;
+        // HTTP Basic is what the OIDC default (client_secret_basic) means. A provider that advertises client_secret_post and NOT basic
+        // gets the secret in the request body instead; nothing else about the flow changes.
+        const methods = discovered.serverMetadata().token_endpoint_auth_methods_supported;
+        if (secret && Array.isArray(methods) && methods.includes('client_secret_post') && !methods.includes('client_secret_basic')) {
+          const post = new client.Configuration(discovered.serverMetadata(), this.oidc.clientId, metadata, client.ClientSecretPost(secret));
+          post.timeout = IDP_HTTP_TIMEOUT_SECONDS;
+          if (this.oidc.allowInsecureIssuer) client.allowInsecureRequests(post);
+          return post;
+        }
+        return discovered;
       })();
       this.configPromise = p;
       p.catch(() => { if (this.configPromise === p) this.configPromise = null; });
