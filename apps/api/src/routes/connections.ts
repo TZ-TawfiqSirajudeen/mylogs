@@ -5,10 +5,12 @@ import {
 } from '@nexus/contracts';
 import type { ConnectionService, Scope } from '@nexus/connections';
 import type { ConnectorRegistry, TestReport } from '@nexus/connector-sdk';
+import { resolveMongoSrv, SrvError } from '@nexus/connectors';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import type { ProjectAction } from '../authz/policy.js';
+import { AppError } from '../errors.js';
 import { principalOf } from '../plugins/auth.js';
 import type { ProjectService } from '../services/projects.js';
 
@@ -106,6 +108,23 @@ export function connectionRoutes(deps: { projects: ProjectService; connections: 
     r.post('/api/v1/projects/:projectId/connections/:connectionId/disconnect', {
       ...pre, schema: { tags: ['connections'], summary: 'Stop monitoring and revoke (delete) stored credentials', params: ConnectionIdParams, response: { 200: ConnectionDto } },
     }, async (req) => connections.disconnect(await scopeFor(req, req.params.projectId, MANAGE), req.params.connectionId, actorOf(req)));
+
+    // Helper for the connection form: a mongodb+srv:// string cannot be turned into member hosts in the browser (needs DNS).
+    // Only the seed host name arrives here, never a username or password. No connection to the database is made.
+    r.post('/api/v1/projects/:projectId/connectors/mongodb/resolve-srv', {
+      ...pre, config: throttled,
+      schema: {
+        tags: ['connections'], summary: 'Expand a mongodb+srv:// seed name into its members (DNS lookup only)',
+        params: z.object({ projectId: ConnectionParams.shape.projectId }), body: z.strictObject({ host: z.string().trim().min(1).max(253) }),
+        response: { 200: z.object({ hosts: z.array(z.object({ host: z.string(), port: z.number() })), authSource: z.string().nullable(), replicaSet: z.string().nullable(), truncated: z.boolean() }) },
+      },
+    }, async (req) => {
+      await scopeFor(req, req.params.projectId, MANAGE);
+      try { return await resolveMongoSrv(req.body.host); } catch (e) {
+        if (e instanceof SrvError) throw new AppError(400, 'validation_error', e.message);
+        throw e;
+      }
+    });
 
     r.delete('/api/v1/projects/:projectId/connections/:connectionId', {
       ...pre, schema: { tags: ['connections'], params: ConnectionIdParams, response: { 204: z.null() } },

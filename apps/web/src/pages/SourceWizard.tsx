@@ -184,7 +184,7 @@ export default function SourceWizard() {
         {step === 3 && descriptor && authMethod && (
           <div className="space-y-4">
             <label className="block space-y-1 text-sm"><span className="font-medium">Connection name</span><input className={field} value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="checkout api (prod)" /></label>
-            <ConfigForm type={descriptor.type} authMethod={authMethod} draft={draft} onChange={setDraft} />
+            <ConfigForm type={descriptor.type} authMethod={authMethod} draft={draft} onChange={setDraft} projectId={projectId} onSecret={(n, v) => setSecrets((s) => ({ ...s, [n]: v }))} />
             {(method?.secretFields.length ?? 0) > 0 && (
               <div className="space-y-2 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
                 <p className="text-sm font-medium">Credentials</p>

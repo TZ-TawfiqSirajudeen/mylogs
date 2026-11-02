@@ -243,6 +243,24 @@ describe('input validation and SSRF through the API', () => {
 });
 
 describe('secret hygiene across every response', () => {
+describe('mongodb+srv helper (connection form)', () => {
+  const url = () => `${base()}/connectors/mongodb/resolve-srv`;
+  test('only people who can manage connections may use it; other tenants cannot see the project', async () => {
+    expect((await viewer.req('POST', url(), { host: 'c.abcde.mongodb.net' })).status).toBe(403);
+    expect((await engineer.req('POST', url(), { host: 'c.abcde.mongodb.net' })).status).toBe(403);
+    for (const c of [auditor, globex]) expect((await c.req('POST', url(), { host: 'c.abcde.mongodb.net' })).status).toBe(404);
+  });
+  test('names that are not a cluster DNS name are refused before any lookup; extra body fields are refused', async () => {
+    for (const host of ['localhost', '10.0.0.1', 'a.b', 'bad_label.x.y', '169.254.169.254']) {
+      const r = await owner.req('POST', url(), { host });
+      expect(r.status, host).toBe(400);
+      expect(r.json.error.code, host).toBe('validation_error');
+    }
+    expect((await owner.req('POST', url(), { host: 'c.abcde.mongodb.net', password: 'x' })).status).toBe(400);
+    expect((await owner.req('POST', url(), {})).status).toBe(400);
+  });
+});
+
   test('no response body anywhere contained a credential', () => {
     expect(bodies.length).toBeGreaterThan(40);
     for (const b of bodies) {

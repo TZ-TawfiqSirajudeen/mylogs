@@ -1,8 +1,10 @@
 import type { ConnectionDto, ConnectionState, ConnectorDescriptorDto } from '@nexus/contracts';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { z } from 'zod';
 import type { TestReportDto } from '@nexus/contracts';
+import { api } from '../../api';
 import { Badge } from '../../ui';
+import { parseMongoUri } from './mongo-uri';
 
 export type Report = z.infer<typeof TestReportDto>;
 
@@ -104,7 +106,48 @@ export function buildConfig(type: string, authMethod: string, d: ConfigDraft): R
 
 const inputCls = 'w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900';
 
-export function ConfigForm({ type, authMethod, draft, onChange }: { type: string; authMethod: string; draft: ConfigDraft; onChange: (d: ConfigDraft) => void }) {
+/**
+ * "Paste a connection string": fills the host list, user, auth database and TLS from what Atlas / a DBA gave you. The password
+ * goes straight to the write-only credential field. mongodb+srv:// is expanded by the server (DNS only; it receives the host
+ * name, never the user or password). The pasted text is cleared immediately and never stored.
+ */
+function MongoPaste({ projectId, authMethod, draft, onChange, onSecret }: { projectId: string | null; authMethod: string; draft: ConfigDraft; onChange: (d: ConfigDraft) => void; onSecret?: (name: string, value: string) => void }) {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const fill = async () => {
+    const parsed = parseMongoUri(text);
+    if (!parsed.ok) { setMsg({ ok: false, text: parsed.error }); return; }
+    const u = parsed.value;
+    setBusy(true); setMsg(null);
+    try {
+      let hosts = u.hosts, authSource = u.authSource, note = '';
+      if (u.srvHost) {
+        if (!projectId) throw new Error('Choose a project first (step 2), then paste the string.');
+        const r = await api<{ hosts: { host: string; port: number }[]; authSource: string | null; replicaSet: string | null; truncated: boolean }>('POST', `/api/v1/projects/${projectId}/connectors/mongodb/resolve-srv`, { host: u.srvHost });
+        hosts = r.hosts; authSource ??= r.authSource;
+        note = ` ${r.hosts.length} member${r.hosts.length === 1 ? '' : 's'} found by DNS.${r.truncated ? ' More than 7 exist; only the first 7 are used.' : ''}`;
+      }
+      onChange({ ...draft, hosts: hosts.map((h) => `${h.host}:${h.port}`).join('\n'), authSource: authSource ?? String(draft.authSource || 'admin'), ...(u.tls !== null ? { tls: u.tls } : {}), ...(u.username ? { username: u.username } : {}) });
+      const parts = [`Form filled.${note}`];
+      if (u.password) { onSecret?.('password', u.password); parts.push(authMethod === 'scram' ? 'The password is in the Credentials box below.' : 'This string has a password, but the "No authentication" method is selected: go back and choose "Username + password".'); }
+      if (u.ignored.length) parts.push(`Ignored (not needed for monitoring): ${u.ignored.join(', ')}.`);
+      setMsg({ ok: true, text: parts.join(' ') });
+      setText('');
+    } catch (e) { setMsg({ ok: false, text: e instanceof Error ? e.message : 'Could not use that connection string.' }); } finally { setBusy(false); }
+  };
+  return (
+    <div className="space-y-2 rounded-lg border border-slate-200 p-3 sm:col-span-2 dark:border-slate-800">
+      <label className="block space-y-1 text-sm"><span className="font-medium">Connection string (optional shortcut)</span>
+        <input type="password" autoComplete="off" spellCheck={false} data-testid="mongo-uri" className={inputCls} value={text} onChange={(e) => setText(e.target.value)} placeholder="mongodb+srv://user:password@cluster0.abcde.mongodb.net/" />
+        <span className="block text-xs text-slate-500">Paste what Atlas gave you ("Connect" → "Drivers"). It is read in your browser and cleared right after; only the cluster's DNS name is sent to the server.</span></label>
+      <button type="button" data-testid="mongo-uri-fill" disabled={busy || !text.trim()} onClick={() => void fill()} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium disabled:opacity-50 dark:border-slate-700">{busy ? 'Looking up…' : 'Fill the form from it'}</button>
+      {msg && <p role={msg.ok ? 'status' : 'alert'} data-testid="mongo-uri-msg" className={`text-sm ${msg.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400'}`}>{msg.text}</p>}
+    </div>
+  );
+}
+
+export function ConfigForm({ type, authMethod, draft, onChange, projectId = null, onSecret }: { type: string; authMethod: string; draft: ConfigDraft; onChange: (d: ConfigDraft) => void; projectId?: string | null; onSecret?: (name: string, value: string) => void }) {
   const set = (k: string, v: string | boolean) => onChange({ ...draft, [k]: v });
   const text = (k: string, label: string, ph = '', hint?: string) => (
     <label className="block space-y-1 text-sm"><span className="font-medium">{label}</span>
@@ -130,9 +173,12 @@ export function ConfigForm({ type, authMethod, draft, onChange }: { type: string
   if (type === 'mongodb') {
     return (
       <div className="grid gap-3 sm:grid-cols-2">
+        <MongoPaste projectId={projectId} authMethod={authMethod} draft={draft} onChange={onChange} {...(onSecret ? { onSecret } : {})} />
         <label className="block space-y-1 text-sm sm:col-span-2"><span className="font-medium">Hosts (one per line, host:port)</span>
           <textarea className={inputCls} rows={3} value={String(draft.hosts ?? '')} placeholder="mongo-1.example.com:27017" onChange={(e) => set('hosts', e.target.value)} />
-          <span className="block text-xs text-slate-500">Each member is monitored individually; topology discovery is disabled on purpose.</span></label>
+          {String(draft.hosts ?? '').includes('://')
+            ? <span role="alert" className="block text-xs text-red-700 dark:text-red-400">This looks like a connection string, not a host name. Paste it into the "Connection string" box above and choose "Fill the form from it".</span>
+            : <span className="block text-xs text-slate-500">Each member is monitored individually; topology discovery is disabled on purpose.</span>}</label>
         {authMethod === 'scram' && text('username', 'Monitoring user', 'nexus_monitor')}
         {text('authSource', 'Auth database', 'admin')}
         <div className="sm:col-span-2">{check('tls', 'Use TLS (strongly recommended)')}</div>
