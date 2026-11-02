@@ -54,8 +54,10 @@ test.describe('logs explorer', () => {
     await expect(fresh).toContainText('shown once');
     const token = (await page.getByTestId('fresh-token-value').textContent())!.trim();
     expect(token).toMatch(/^nxi_[A-Za-z0-9_-]{43}$/);
-    await expect(fresh).toContainText('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=');
+    // One endpoint serves logs, traces and metrics; the per-signal URLs are listed beneath it.
+    await expect(fresh).toContainText('OTEL_EXPORTER_OTLP_ENDPOINT=');
     await expect(fresh).toContainText(`${env().ingest}/v1/logs`);
+    await expect(fresh).toContainText(`${env().ingest}/v1/traces`);
     await page.getByRole('button', { name: /dismiss/ }).click();
     await expect(page.getByText(token)).toHaveCount(0);
     expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain(token);
