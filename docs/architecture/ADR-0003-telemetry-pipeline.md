@@ -51,13 +51,13 @@ event with an old timestamp is still delivered. ≤3 streams per user, ≤10 min
 response socket (not the request) so slots are released.
 
 ## Not done / follow-ups
-* OTLP **traces and metrics**, and gRPC transport — phase 4. The endpoint rejects nothing it cannot parse silently: only `/v1/logs` and `/v1/json-logs` exist.
+* OTLP **traces and metrics** — written here as phase 4; **implemented since** (`/v1/traces`, `/v1/metrics`; see ADR-0005). **gRPC transport is still not supported.** The endpoint rejects nothing it cannot parse silently.
 * Per-process rate limits (several ingest replicas multiply the effective limit).
 * No durable queue in front of storage: during a storage outage senders must retry (they are told to, with Retry-After).
 * Full-text search is a case-insensitive substring match on a pre-lowercased `searchText` field held in a covering index (first 2,048 characters of the message). It is
   not an inverted index: a miss scans the index range for the selected time window (linear; see `docs/performance.md`).
 * The OpenTelemetry **Collector** configuration (`infra/otel-collector/`) is validated with the real `otelcol-contrib` v0.164.0 binary and an authenticated
-  Collector → ingestion → UI path is covered by an end-to-end test (`docs/runbooks/collector.md`); gRPC receiver traffic and the container image were not exercised.
+  Collector → ingestion → UI path is covered by an end-to-end test (`docs/runbooks/collector.md`); a gRPC trace call through the Collector's gRPC receiver was later exercised (`apps/ingest/test/collector-grpc-relay.test.ts`; metrics/logs over gRPC were not), the container image was not.
 
 ## When to move to ClickHouse
 Sustained ingest above ~5–10k records/s per node, retention beyond a few weeks at that rate, or interactive queries over hundreds of millions of rows.

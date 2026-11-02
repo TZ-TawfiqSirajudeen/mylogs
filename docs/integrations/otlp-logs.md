@@ -1,6 +1,6 @@
 # Sending logs to Nexus Observability
 
-**Status: implemented and tested** for logs. Traces and metrics over OTLP are planned (phase 4); the endpoint does not accept them yet.
+**Status: implemented and tested** for logs. Traces and metrics over OTLP/HTTP are implemented too (since phase 4): see [otlp-traces-metrics.md](otlp-traces-metrics.md). OTLP/gRPC is not supported.
 Verified end to end with the OpenTelemetry JS SDK's OTLP exporters (protobuf and JSON) **and** with a real OpenTelemetry **Collector** (contrib v0.164.0) running
 `infra/otel-collector/config.yaml` unmodified — see [the Collector runbook](../runbooks/collector.md) for what that does and does not cover.
 

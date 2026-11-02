@@ -13,8 +13,9 @@ per-environment bearer token. It targets the **contrib** distribution (needs the
 | A token **without** the `traces` signal is refused with 403 by the ingestion service when relayed by the Collector; nothing is stored and the Collector reports the failure | same spec, test 4 | same |
 | Records tailed from a JSON-lines file by the Collector's `filelog` receiver arrive the same way | same spec | same |
 | A wrong token is refused (HTTP 401) and nothing is stored | same spec | same |
+| **gRPC in, HTTP out (the workaround for gRPC-only SDKs):** a real gRPC `TraceService/Export` call (hand-framed over HTTP/2) to the Collector's own gRPC receiver answers `grpc-status 0`, and the span reaches storage under the token's tenant | `apps/ingest/test/collector-grpc-relay.test.ts` (real binary, unmodified config, real ingestion app and mongod; needs `OTELCOL_BIN`, otherwise skipped) | otelcol-contrib **v0.164.0**, Windows amd64, 2026-10-31 |
 
-**Not verified:** OTLP/gRPC (Nexus does not accept it; the Collector's own gRPC receiver port opens but no gRPC client was sent through it), Kubernetes/Helm deployment, the container
+**Not verified:** OTLP/gRPC *into Nexus* (Nexus does not accept it: gRPC clients get a 415/400 refusal, pinned by `apps/ingest/test/grpc-clients.test.ts`); gRPC **metrics and logs** through the Collector (only traces were sent through the gRPC receiver), a real gRPC *library* client (the call was framed by hand), Kubernetes/Helm deployment, the container
 image `otel/opentelemetry-collector-contrib` (only the release **binary** was run — Docker was not available), TLS to the ingestion
 endpoint, long-running behaviour (retry queue under multi-minute outages, memory limiter under load), other Collector versions.
 

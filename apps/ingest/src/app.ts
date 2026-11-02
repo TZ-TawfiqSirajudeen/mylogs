@@ -73,7 +73,14 @@ export async function buildIngestApp(db: Database, cfg: IngestAppConfig = DEFAUL
   app.setErrorHandler((err: Error & { statusCode?: number; code?: string }, req, reply) => {
     const status = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
     if (status === 413) return reply.code(413).send({ error: 'payload_too_large', message: `Request body exceeds ${cfg.maxBodyBytes} bytes`, requestId: req.id });
-    if (status === 415) return reply.code(415).send({ error: 'unsupported_media_type', message: err.message, requestId: req.id });
+    if (status === 415) {
+      // A gRPC exporter gets told what to do instead of a bare "Unsupported Media Type".
+      const grpc = String(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/grpc');
+      const message = grpc
+        ? 'OTLP/gRPC is not supported. Send OTLP over HTTP (POST /v1/traces, /v1/metrics or /v1/logs with application/x-protobuf or application/json; set OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf), or send gRPC to an OpenTelemetry Collector that exports to this service with the otlphttp exporter.'
+        : err.message;
+      return reply.code(415).send({ error: 'unsupported_media_type', message, requestId: req.id });
+    }
     if (status < 500) return reply.code(status).send({ error: 'bad_request', message: 'Malformed request', requestId: req.id });
     req.log.error({ err }, 'unhandled error');
     return reply.code(500).send({ error: 'internal_error', message: 'Internal error', requestId: req.id });

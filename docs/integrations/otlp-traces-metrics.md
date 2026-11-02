@@ -30,6 +30,12 @@ OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta          # default is cu
 OTEL_SEMCONV_STABILITY_OPT_IN=http                               # http.server.request.duration (seconds) instead of the legacy http.server.duration (ms)
 ```
 
+**If your SDK or agent defaults to gRPC** (the default differs between languages and versions; check your language's OpenTelemetry documentation), set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
+explicitly as above, and pick an HTTP exporter package where the language has separate ones (in Node.js: `exporter-trace-otlp-proto`, not `-grpc`). A gRPC client that is pointed at this
+service is **refused, not served**: an HTTP/1.1 request with `Content-Type: application/grpc` gets `415 unsupported_media_type` with the message "OTLP/gRPC is not supported…", and a real
+HTTP/2 gRPC connection is closed with an HTTP `400` (the client library typically reports a generic protocol or "unavailable" error, because the server does not speak HTTP/2). If the
+language really only offers gRPC, send gRPC to an OpenTelemetry Collector and export to Nexus from there with the `otlphttp` exporter ([collector runbook](../runbooks/collector.md)).
+
 Bootstrap order matters: **register the SDK and instrumentation before the framework is imported** (instrumentation patches modules as they load).
 
 ```ts
@@ -110,7 +116,7 @@ Redaction is best-effort: it cannot recognise an arbitrary secret in arbitrary t
 
 ## 7. Limits and failure behaviour
 
-* Body limit 4 MiB after decompression (decompression bombs → 413); at most 5,000 spans / data points per request (the rest are refused and counted).
+* Body limit 4 MiB after decompression (decompression bombs → 413; setting `INGEST_MAX_BODY_BYTES`); at most 5,000 spans / data points per request (setting `INGEST_MAX_RECORDS_PER_REQUEST`; the rest are refused and counted).
 * Per-token and per-project rate limits → `429 Retry-After`; bounded queue → `503 Retry-After` (backpressure); storage failure → `503 Retry-After`. All exporters retry these.
 * Invalid items are refused individually and reported in the response (`partialSuccess.rejectedSpans` / `rejectedDataPoints`); the rest of the request is stored.
 * A span with an invalid trace/span/parent id or no start time is refused; a span with no valid end time is stored **without** a duration.
