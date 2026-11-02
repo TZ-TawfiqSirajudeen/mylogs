@@ -12,7 +12,7 @@
     "start": "tsx src/cli.ts"
   },
   "dependencies": {
-    "jose": "^6.2.13"
+    "jose": "^6.2.14"
   },
   "devDependencies": {
     "tsx": "^4.23.15",
