@@ -11,17 +11,18 @@ export const PUSH_CONNECTORS: ConnectorDescriptor[] = [
     type: 'otlp', displayName: 'OpenTelemetry (OTLP/HTTP) logs', category: 'application', status: 'implemented', mode: 'push', collection: 'implemented',
     signals: [
       { signal: 'logs', availability: 'supported', note: 'POST /v1/logs — protobuf or JSON, gzip/deflate/brotli. Verified with the OpenTelemetry JS SDK exporters.' },
-      { signal: 'traces', availability: 'planned', note: 'Phase 4' }, { signal: 'metrics', availability: 'planned', note: 'Phase 4' },
+      { signal: 'traces', availability: 'supported', note: 'POST /v1/traces — protobuf or JSON, gzip. Needs a token with the traces scope. Verified with the OpenTelemetry JS SDK exporters and a real Collector.' },
+      { signal: 'metrics', availability: 'supported', note: 'POST /v1/metrics — gauge, sum and explicit-bucket histogram (exponential histograms and summaries are rejected and counted). Needs a token with the metrics scope.' },
       { signal: 'events', availability: 'unsupported' }, { signal: 'inventory', availability: 'unsupported' },
     ],
     deploymentTypes: ['any OpenTelemetry SDK', 'OpenTelemetry Collector (otlphttp exporter)'],
     authMethods: [token],
     requiredPermissions: [{ scope: 'platform', permission: 'Project admin to create the token', why: 'Tokens are bound to one environment and are the only credential senders need.' }],
-    operations: ['POST /v1/logs'],
-    configRequirements: ['Ingestion service reachable from the sender (default port 4318)', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT + Authorization header'],
+    operations: ['POST /v1/logs', 'POST /v1/traces', 'POST /v1/metrics'],
+    configRequirements: ['Ingestion service reachable from the sender (default port 4318)', 'OTEL_EXPORTER_OTLP_ENDPOINT + OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf + Authorization header'],
     limitations: [
-      'Logs only: traces and metrics are not accepted yet', 'OTLP/gRPC is not supported (HTTP only)', '4 MiB body, 5 000 records per request, 32 KiB per message',
-      'Verified live with the OTel JS SDK; a stock Collector run was not possible on the development machine (config provided in infra/otel-collector)',
+      'Tokens created before traces and metrics existed carry the logs scope only: create a new token to send other signals', 'OTLP/gRPC is not supported (HTTP only); send gRPC to an OpenTelemetry Collector that exports with otlphttp', '4 MiB body, 5 000 records per request, 32 KiB per message',
+      'Verified live with the OTel JS SDK and a real otelcol-contrib v0.164.0 (see docs/runbooks/collector.md); Docker images and a real identity provider are unverified',
     ],
   },
   {

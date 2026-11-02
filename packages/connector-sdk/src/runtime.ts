@@ -82,9 +82,14 @@ export interface HealthPolicy {
  */
 export function nextCheckDelay(consecutiveFailures: number, p: HealthPolicy, retryAfterMs?: number, random: () => number = Math.random): number {
   if (consecutiveFailures <= 0) return p.intervalMs;
-  const exp = Math.min(p.maxBackoffMs, p.intervalMs * 2 ** Math.min(consecutiveFailures, 10));
+  // A failing target is never polled MORE often than a healthy one: with a polling interval above the ceiling (e.g. 1 h vs 15 min) the ceiling is the interval.
+  const ceiling = Math.max(p.maxBackoffMs, p.intervalMs);
+  const exp = Math.min(ceiling, p.intervalMs * 2 ** Math.min(consecutiveFailures, 10));
   const jitter = 0.8 + random() * 0.4; // ±20 % so many connections do not synchronise
-  return Math.min(p.maxBackoffMs, Math.max(Math.floor(exp * jitter), retryAfterMs ?? 0));
+  let jittered = exp * jitter;
+  // Clamping at the ceiling would put every connection whose jitter lands above it on the same instant (about half of them, every time). Fold the excess back instead.
+  if (jittered > ceiling) jittered = ceiling - (jittered - ceiling);
+  return Math.min(ceiling, Math.max(Math.floor(jittered), p.intervalMs, retryAfterMs ?? 0));
 }
 
 export type { ConnectorContext };

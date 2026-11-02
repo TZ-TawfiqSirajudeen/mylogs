@@ -9,15 +9,23 @@ test('pull connectors are runnable; push sources are implemented but not connect
   expect(push).toEqual(['json-logs', 'otlp']);
   for (const d of r.list()) {
     expect(Boolean(r.runnable(d.type)), d.type).toBe(d.status === 'implemented' && d.mode !== 'push');
-    // pull connectors verify and monitor only; only the push (ingestion) sources deliver telemetry
-    expect(d.collection, d.type).toBe(d.mode === 'push' ? 'implemented' : 'not_implemented');
+    // push sources deliver telemetry; of the pull connectors only the database ones sample metrics (and must then implement collect())
+    const collects = d.mode === 'push' || d.type === 'mongodb' || d.type === 'redis';
+    expect(d.collection, d.type).toBe(collects ? 'implemented' : 'not_implemented');
+    if (d.mode !== 'push') expect(Boolean(r.runnable(d.type)?.collect), d.type).toBe(collects && d.status === 'implemented');
     if (d.status === 'planned') {
       expect(d.limitations.join(' '), d.type).toMatch(/Not implemented/);
       expect(d.signals.every((s) => s.availability !== 'supported'), d.type).toBe(true);
     }
   }
-  // the ingestion endpoint accepts logs only: traces and metrics over OTLP must not be claimed yet
-  for (const d of r.list().filter((x) => x.mode === 'push')) for (const sig of d.signals.filter((x) => x.signal === 'traces' || x.signal === 'metrics')) expect(sig.availability, `${d.type}:${sig.signal}`).not.toBe('supported');
+  // The ingestion service accepts OTLP traces and metrics (Phase 4) and nothing else besides logs: only the OTLP source may claim them,
+  // and the plain JSON log source must not.
+  for (const d of r.list().filter((x) => x.mode === 'push')) {
+    for (const sig of d.signals.filter((x) => x.signal === 'traces' || x.signal === 'metrics')) {
+      if (d.type === 'otlp') expect(sig.availability, `${d.type}:${sig.signal}`).toBe('supported');
+      else expect(sig.availability, `${d.type}:${sig.signal}`).not.toBe('supported');
+    }
+  }
 });
 
 test('every implemented connector documents least-privilege permissions and limitations', () => {

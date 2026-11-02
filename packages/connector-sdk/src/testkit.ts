@@ -40,8 +40,8 @@ export async function runConnectorContract<Config, Creds extends Record<string, 
   check('descriptor: signals are unique and known', new Set(d.signals.map((s) => s.signal)).size === d.signals.length && d.signals.every((s) => SIGNALS.includes(s.signal)));
   check('descriptor: every auth method has a credential schema', d.authMethods.every((a) => connector.credentialSchema(a.id) !== undefined));
   check('descriptor: exactly one recommended auth method', d.authMethods.length === 0 || d.authMethods.filter((a) => a.recommended).length === 1);
-  check('descriptor: collection flag matches implementation', d.collection === 'implemented' ? !!connector.initialSync && !!connector.collect : !connector.initialSync && !connector.collect,
-    'a connector may only claim collection if initialSync/collect exist (and must not have them otherwise)');
+  check('descriptor: collection flag matches implementation', d.collection === 'implemented' ? !!connector.collect : !connector.collect,
+    'a connector may only claim collection if collect() exists (and must not have it otherwise)');
   check('config schema rejects garbage', !connector.configSchema.safeParse({ nonsense: true }).success && !connector.configSchema.safeParse(null).success);
   check('config schema accepts the valid fixture', connector.configSchema.safeParse(fx.valid.config).success);
   const method = d.authMethods.find((a) => a.id === fx.valid.authMethod);

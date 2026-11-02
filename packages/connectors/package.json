@@ -8,7 +8,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests", "matrix": "tsx src/matrix.ts"
+    "test": "vitest run --passWithNoTests", "test:resilience": "vitest run -c vitest.resilience.config.ts", "matrix": "tsx src/matrix.ts"
   },
   "dependencies": {
     "@nexus/connector-sdk": "workspace:*",

@@ -45,7 +45,7 @@ export interface ConnectorDescriptor {
    * push: senders deliver data to the platform's ingestion endpoint with a token; there is nothing to connect to.
    */
   mode?: 'pull' | 'push';
-  /** Which collection phases exist. Phase-2 connectors validate/discover/monitor health only. */
+  /** Whether the connector samples metrics on a schedule (`collect`). `not_implemented` = verified and health-monitored only. */
   collection: 'not_implemented' | 'implemented';
   signals: { signal: Signal; availability: SignalAvailability; note?: string }[];
   deploymentTypes: string[];
@@ -172,14 +172,50 @@ export interface SelectionInput {
   signals: Signal[];
 }
 
-// ---------------------------------------------------------------- collection (reserved, see descriptor.collection)
+// ---------------------------------------------------------------- collection (pull connectors: read-only metric sampling)
 
-export interface TelemetryBatch {
-  signal: Signal;
-  records: Record<string, unknown>[];
+/**
+ * One measurement a pull connector read from its target. Only two shapes exist so nothing can be mistaken for something else:
+ * a `gauge` (a value at an instant) and a cumulative monotonic `sum` (a counter that only grows until the target restarts; the platform
+ * turns it into per-interval increases and handles resets). Values are always numbers the target actually reported.
+ */
+export interface MetricSample {
+  /** Dotted metric name, e.g. `mongodb.connections.current`. */
+  name: string;
+  /** UCUM-style unit: `By`, `s`, `1`, or a `{annotation}` such as `{connection}`. */
+  unit: string;
+  description: string;
+  kind: 'gauge' | 'sum';
+  value: number;
+  /** Bounded labels (e.g. `operation=insert`, `db.namespace=orders`). Never values read from the target's data. */
+  attributes: Record<string, string>;
 }
 
-export interface CollectionCursor { token: string | null }
+export interface CollectionResult {
+  samples: MetricSample[];
+  /** Samples not returned because the per-connection series cap was reached. */
+  dropped: number;
+  /** Plain-language partial failures (e.g. one command refused by the target); the collection still counts as successful if any sample exists. */
+  notes: string[];
+}
+
+/** Hard ceiling on distinct series (name + labels) a single connection may produce per collection. */
+export const MAX_SERIES_PER_CONNECTION = 500;
+
+/** Keeps the first `max` distinct series, in the order given; later ones are counted as dropped. */
+export function capSeries(samples: MetricSample[], max = MAX_SERIES_PER_CONNECTION): { samples: MetricSample[]; dropped: number } {
+  const seen = new Set<string>();
+  const kept: MetricSample[] = [];
+  let dropped = 0;
+  for (const s of samples) {
+    const key = `${s.name}${Object.entries(s.attributes).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join('')}`;
+    if (seen.has(key)) continue; // an exact duplicate adds nothing
+    if (seen.size >= max) { dropped++; continue; }
+    seen.add(key);
+    kept.push(s);
+  }
+  return { samples: kept, dropped };
+}
 
 // ---------------------------------------------------------------- the connector contract
 
@@ -196,9 +232,12 @@ export interface Connector<Config = unknown, Creds = Record<string, string>> {
   test(ctx: ConnectorContext, config: Config, creds: Creds): Promise<TestReport>;
   discover(ctx: ConnectorContext, config: Config, creds: Creds): Promise<DiscoveryResult>;
 
-  /** Reserved for collection phases; connectors without it declare `collection: 'not_implemented'`. */
-  initialSync?(ctx: ConnectorContext, config: Config, creds: Creds, sel: SelectionInput): AsyncIterable<TelemetryBatch>;
-  collect?(ctx: ConnectorContext, config: Config, creds: Creds, sel: SelectionInput, cursor: CollectionCursor): AsyncIterable<TelemetryBatch>;
+  /**
+   * Read-only sampling of the resources the user selected (`sel`). Present only when `descriptor.collection === 'implemented'`.
+   * Must respect the connector's command allow-list, must never read user data, must honour `ctx.signal`, and must throw a
+   * ConnectorError only when NOTHING could be collected (partial results are returned with `notes`).
+   */
+  collect?(ctx: ConnectorContext, config: Config, creds: Creds, sel: SelectionInput): Promise<CollectionResult>;
 
   /** Called after credentials were replaced (e.g. to drop pooled clients). */
   onCredentialRotation?(config: Config): Promise<void>;
