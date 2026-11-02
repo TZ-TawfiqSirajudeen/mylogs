@@ -206,6 +206,9 @@ importers:
       '@nexus/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@nexus/metricstore':
+        specifier: workspace:*
+        version: link:../../packages/metricstore
       '@nexus/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets
@@ -216,6 +219,18 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
     devDependencies:
+      '@nexus/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      ioredis:
+        specifier: ^6.0.0
+        version: 6.0.0
+      mongodb:
+        specifier: ^7.7.0
+        version: 7.7.0
+      mongodb-memory-server:
+        specifier: ^11.3.0
+        version: 11.3.0
       tsup:
         specifier: ^9.0.0
         version: 9.0.0(jiti@2.7.0)(postcss@8.5.32)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1)

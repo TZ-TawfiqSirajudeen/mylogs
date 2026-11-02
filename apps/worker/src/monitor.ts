@@ -32,6 +32,8 @@ export class MonitorWorker {
   private readonly inflight = new Set<Promise<void>>();
   private timer: NodeJS.Timeout | null = null;
   private stopping = false;
+  /** Aborted when the shutdown grace period runs out: running checks stop talking to their targets and release their leases. */
+  private readonly abort = new AbortController();
   private lastPurge = 0;
   private readonly log: NonNullable<MonitorOptions['log']>;
 
@@ -62,7 +64,7 @@ export class MonitorWorker {
 
   private launch(c: Parameters<ConnectionService['runMonitorCheck']>[0]) {
     this.metrics.checksStarted++;
-    const p = this.svc.runMonitorCheck(c, this.o.owner)
+    const p = this.svc.runMonitorCheck(c, this.o.owner, this.abort.signal)
       .then((state) => {
         if (state !== 'healthy') this.metrics.checksUnhealthy++;
         this.log('info', 'check finished', { connection: c._id, state });
@@ -95,11 +97,22 @@ export class MonitorWorker {
     void loop();
   }
 
-  /** Graceful shutdown: stop claiming, let running checks finish (bounded), release nothing half-done. */
+  /**
+   * Graceful shutdown: stop claiming and let running checks finish (bounded). When the grace period runs out the remaining checks are ABORTED rather than
+   * abandoned: their sockets close, nothing half-done is recorded as a failure of the target, and their leases are released so another worker takes over at once.
+   */
   async stop(graceMs = 15_000): Promise<{ drained: boolean }> {
     this.stopping = true;
     if (this.timer) clearTimeout(this.timer);
-    const drained = await Promise.race([this.idle().then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), graceMs))]);
+    let t: NodeJS.Timeout | undefined;
+    const drained = await Promise.race([this.idle().then(() => true), new Promise<boolean>((r) => { t = setTimeout(() => r(false), graceMs); })]);
+    clearTimeout(t);
+    if (!drained) {
+      this.abort.abort();
+      let t2: NodeJS.Timeout | undefined;
+      await Promise.race([this.idle(), new Promise<void>((r) => { t2 = setTimeout(r, 2_000); })]);
+      clearTimeout(t2);
+    }
     return { drained };
   }
 

@@ -3,6 +3,7 @@ import { hostname } from 'node:os';
 import { ConnectionService } from '@nexus/connections';
 import { createDefaultRegistry } from '@nexus/connectors';
 import { AuditService, connectDatabase } from '@nexus/database';
+import { connectorMetricSink, MongoMetricStore, startRollupCompactor } from '@nexus/metricstore';
 import { loadKeyring, SecretStore } from '@nexus/secrets';
 import { parseNetworkPolicy } from '@nexus/security';
 import { z } from 'zod';
@@ -23,6 +24,8 @@ const Env = z.object({
   WORKER_HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(4100),
   WORKER_HEALTH_HOST: z.string().default('127.0.0.1'),
   CONNECTION_TEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
+  /** Metric rollup compaction (ADR-0007): how often the worker rolls sealed minutes into the 5-minute and 1-hour tiers. 0 turns it off (queries then read minute documents). */
+  METRIC_ROLLUP_INTERVAL_MS: z.coerce.number().int().min(0).max(3_600_000).default(30_000),
 });
 
 const log = (level: string, msg: string, fields: Record<string, unknown> = {}) =>
@@ -39,6 +42,8 @@ async function main() {
   const db = await connectDatabase(e.MONGODB_URI, e.MONGODB_DB);
   const svc = new ConnectionService({
     db, secrets: new SecretStore(db, keyring), registry: createDefaultRegistry(), audit: new AuditService(db), network, testTimeoutMs: e.CONNECTION_TEST_TIMEOUT_MS,
+    // Database connectors (MongoDB, Redis) sample read-only metrics into the same metric store the OTLP ingestion uses.
+    sink: connectorMetricSink(new MongoMetricStore(db)),
   });
   const worker = new MonitorWorker(svc, {
     owner: `${hostname()}:${process.pid}`, concurrency: e.WORKER_CONCURRENCY, tickMs: e.WORKER_TICK_MS,
@@ -59,6 +64,7 @@ async function main() {
   await new Promise<void>((r) => health.listen(e.WORKER_HEALTH_PORT, e.WORKER_HEALTH_HOST, r));
 
   worker.start();
+  const stopRollups = e.METRIC_ROLLUP_INTERVAL_MS > 0 ? startRollupCompactor(db, { intervalMs: e.METRIC_ROLLUP_INTERVAL_MS, owner: `${hostname()}:${process.pid}`, log: (level, msg, fields) => log(level, msg, fields) }) : async () => undefined;
   log('info', 'worker started', { concurrency: e.WORKER_CONCURRENCY, tickMs: e.WORKER_TICK_MS, healthPort: e.WORKER_HEALTH_PORT });
 
   let closing = false;
@@ -68,6 +74,7 @@ async function main() {
     log('info', 'shutting down', { signal });
     const { drained } = await worker.stop(15_000);
     if (!drained) log('warn', 'shutdown grace period elapsed with checks still running; their leases will expire');
+    await stopRollups();
     health.close();
     await db.close();
     process.exit(0);
