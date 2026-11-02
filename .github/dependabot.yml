@@ -1,0 +1,13 @@
+# Keeps GitHub Actions, the Docker base images and npm dependencies current (supply chain). Review the PRs; do not auto-merge.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5

@@ -16,7 +16,12 @@
     "build": "pnpm -r build",
     "e2e": "pnpm --filter @nexus/e2e e2e",
     "dev:ingest": "pnpm --filter @nexus/ingest-service dev",
-    "bench": "pnpm --filter @nexus/ingest bench"
+    "bench": "pnpm --filter @nexus/ingest bench",
+    "test:infra": "node --test infra/scripts/scan-secrets.test.mjs infra/scripts/oidc-staging-verify.test.mjs",
+    "check:containers": "node infra/scripts/check-container-files.mjs",
+    "smoke:prod": "node infra/scripts/prod-smoke.mjs",
+    "scan:secrets": "node infra/scripts/scan-secrets.mjs",
+    "verify:oidc": "node infra/scripts/oidc-staging-verify.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

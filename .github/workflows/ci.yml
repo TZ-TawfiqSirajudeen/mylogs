@@ -1,0 +1,238 @@
+# CI for Nexus Observability.
+#
+# STATUS: written on a Windows machine WITHOUT Docker and WITHOUT access to GitHub Actions. The YAML parses and every Node script it
+# calls was run locally; the workflow itself, the Docker jobs and gitleaks have NOT been run. The first run on GitHub is the first
+# real verification: expect to tune it. docs/deployment.md ("CI") lists what each job proves and what it does not.
+#
+# Action versions are major-version tags. Prefer pinning to commit SHAs (Dependabot, .github/dependabot.yml, keeps them current).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same major as the Dockerfile base image (node:22-bookworm-slim) and package.json "engines" (>=22).
+  NODE_VERSION: '22'
+
+jobs:
+  # ---------------------------------------------------------------------------------------------------------------------------
+  verify:
+    name: Typecheck, tests, builds, production smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager" (pnpm@10.13.1)
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # mongodb-memory-server downloads a mongod binary on first use; keep it between runs.
+      - name: Point mongodb-memory-server at a cached directory
+        run: echo "MONGOMS_DOWNLOAD_DIR=$RUNNER_TEMP/mongoms" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/mongoms
+          key: mongoms-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: mongoms-${{ runner.os }}-
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit and integration tests (mongodb-memory-server; one package at a time, see the root "test" script)
+        run: pnpm test
+
+      - name: Tests of the infra scripts (secret scanner, OIDC staging checker; node:test, local fake IdP)
+        run: pnpm run test:infra
+
+      - name: Build api, worker, ingest and web
+        run: pnpm build
+
+      - name: Container files, static check (Dockerfile / compose / nginx / .dockerignore / collector config)
+        run: pnpm run check:containers
+
+      - name: Production smoke, built bundles in the repository layout (starts its own mongod)
+        run: pnpm run smoke:prod
+
+      - name: Production smoke, `pnpm deploy --prod` layout exactly as the Docker images lay it out
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/deploy"
+          pnpm --filter @nexus/api deploy --prod --legacy "$out/api"
+          pnpm --filter @nexus/worker deploy --prod --legacy "$out/worker"
+          pnpm --filter @nexus/ingest-service deploy --prod --legacy "$out/ingest"
+          cp -r apps/api/dist "$out/api/dist"
+          cp -r apps/worker/dist "$out/worker/dist"
+          cp -r apps/ingest/dist "$out/ingest/dist"
+          SMOKE_DEPLOY_DIR="$out" node infra/scripts/prod-smoke.mjs
+
+  # ---------------------------------------------------------------------------------------------------------------------------
+  secret-scan:
+    name: Secret scan (working tree + full history)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the whole history is scanned
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Offline scanner, tree and `git log -p --all` (values are never printed)
+        run: node infra/scripts/scan-secrets.mjs
+
+      # gitleaks from its official image (no licence key needed, unlike the marketplace action for organisations).
+      - name: gitleaks (history, secrets redacted in the log)
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+            ghcr.io/gitleaks/gitleaks:v8.21.2 git /repo \
+            --config /repo/.gitleaks.toml --log-opts="--all" --redact --no-banner --verbose
+
+  # ---------------------------------------------------------------------------------------------------------------------------
+  docker-images:
+    name: Docker image (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: api, entry: dist/server.js }
+          - { target: worker, entry: dist/main.js }
+          - { target: ingest, entry: dist/server.js }
+          - { target: web, entry: /usr/share/nginx/html/index.html }
+          - { target: mock-idp, entry: /repo/packages/mock-idp/src/cli.ts }
+    steps:
+      - uses: actions/checkout@v4
+
+      # Canaries: plant fake "secret" files where a developer's machine has the real ones. They are random and worthless. If .dockerignore
+      # works, none of them can end up in any image; the check below greps the image filesystem for the canary value.
+      - name: Plant canary secret files in the build context
+        run: |
+          set -euo pipefail
+          canary="nexus-ci-canary-$(openssl rand -hex 24)"
+          echo "CANARY=$canary" >> "$GITHUB_ENV"
+          mkdir -p apps/api/.dev-secrets .dev-secrets packages/database/.mongo-data apps/web
+          printf 'MONGODB_URI=mongodb://u:%s@h/\nSECRETS_KEYS=k:%s\n' "$canary" "$canary" > .env
+          printf 'X=%s\n' "$canary" > apps/api/.env
+          printf 'X=%s\n' "$canary" > apps/web/.env.local
+          printf '{"id":"dev","key":"%s"}\n' "$canary" > apps/api/.dev-secrets/kek.json
+          printf '{"id":"dev","key":"%s"}\n' "$canary" > .dev-secrets/kek.json
+          printf '%s\n' "$canary" > packages/database/.mongo-data/canary.wt
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: docker build --target ${{ matrix.target }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          load: true
+          push: false
+          tags: nexus/${{ matrix.target }}:ci
+          cache-from: type=gha,scope=image-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.target }}
+
+      - name: Image listing
+        run: docker image ls "nexus/${{ matrix.target }}"
+
+      - name: Image must not contain .env files, key-encryption-key files or the canary
+        run: |
+          set -u
+          img="nexus/${{ matrix.target }}:ci"
+          names="$(docker run --rm --entrypoint sh "$img" -c "find / -xdev -not -path '*/node_modules/*' \( -name '.env' -o -name '.env.*' -o -name 'kek.json' -o -name '.dev-secrets' -o -name '.mongo-data' \) ! -name '.env.example' -print 2>/dev/null" || true)"
+          if [ -n "$names" ]; then echo "FAIL: secret-looking files inside $img:"; echo "$names"; exit 1; fi
+          echo "PASS: no .env / kek.json / .dev-secrets / .mongo-data paths in $img"
+          hits="$(docker run --rm -e CANARY="$CANARY" --entrypoint sh "$img" -c 'find / -xdev -type f -not -path "*/node_modules/*" -exec grep -lF -e "$CANARY" {} + 2>/dev/null' || true)"
+          if [ -n "$hits" ]; then echo "FAIL: the canary secret is readable inside $img at:"; echo "$hits"; exit 1; fi
+          echo "PASS: canary secret not present anywhere in $img"
+
+      - name: Image runs as a non-root user
+        run: |
+          uid="$(docker run --rm --entrypoint id "nexus/${{ matrix.target }}:ci" -u)"
+          echo "uid=$uid"
+          [ "$uid" != "0" ]
+
+      - name: Image contains the expected entry point and, for node images, no repository sources
+        run: |
+          set -u
+          img="nexus/${{ matrix.target }}:ci"
+          docker run --rm --entrypoint sh "$img" -c 'test -f "$1"' sh "${{ matrix.entry }}"
+          case "${{ matrix.target }}" in
+            api|worker|ingest) docker run --rm --entrypoint sh "$img" -c '! test -e /repo && ! test -d src' ;;
+          esac
+
+  # ---------------------------------------------------------------------------------------------------------------------------
+  docker-compose:
+    name: Compose config, nginx -t, stack smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose config (default, oidc and collector profiles)
+        run: |
+          set -euo pipefail
+          docker compose version
+          docker compose config -q
+          docker compose --profile oidc config -q
+          docker compose --profile collector config -q
+          AUTH_MODE=oidc docker compose --profile oidc --profile collector config -q
+
+      # nginx.conf is a conf.d fragment that proxies to the compose service name `api`; give the throw-away container that name.
+      - name: nginx -t against infra/nginx/nginx.conf (same image tag as the Dockerfile's web target)
+        run: |
+          set -euo pipefail
+          img="$(sed -n 's/^ARG NGINX_IMAGE=//p' Dockerfile)"
+          echo "nginx image: $img"
+          docker run --rm --add-host api:127.0.0.1 \
+            -v "$PWD/infra/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+            "$img" nginx -t
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Start the default stack (dev auth) and wait until every service is healthy
+        run: docker compose up -d --build --wait --wait-timeout 420
+
+      - name: Smoke test, default stack (api / ingest / worker / web through nginx)
+        run: bash infra/scripts/compose-smoke.sh default
+
+      # Second phase: AUTH_MODE=oidc with the dev-only mock IdP. Recreates the api container with the new environment.
+      - name: Start the oidc profile (mock IdP) and wait until healthy
+        env:
+          AUTH_MODE: oidc
+        run: docker compose --profile oidc up -d --build --wait --wait-timeout 420
+
+      - name: Smoke test, oidc profile
+        env:
+          AUTH_MODE: oidc
+        run: bash infra/scripts/compose-smoke.sh oidc
+
+      - name: Dump compose state and logs (failure only)
+        if: failure()
+        run: |
+          docker compose --profile oidc --profile collector ps -a || true
+          docker compose --profile oidc --profile collector logs --no-color --timestamps --tail 400 || true
+          docker ps -a || true
+
+      - name: Tear down (always)
+        if: always()
+        run: docker compose --profile oidc --profile collector down -v --remove-orphans || true
