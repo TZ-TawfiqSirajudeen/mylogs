@@ -1,0 +1,34 @@
+# gitleaks configuration, used by .github/workflows/ci.yml. NOT run locally (gitleaks is not installed on the development machine),
+# so the first CI run may need this file tuned.
+#
+# Extends gitleaks' default rules, adds this repository's MongoDB connection-string rule (the default ruleset has none), and
+# allow-lists ONLY test files that contain deliberately fake credentials (redaction / validation tests). Keep it in step with
+# infra/scripts/secret-scan-allowlist.json. Never allow-list a file because it holds a real credential: rotate and purge it
+# instead (docs/runbooks/credential-rotation.md).
+title = "nexus-observability gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "mongodb-uri-credentials"
+description = "MongoDB connection string with an embedded user:password"
+regex = '''mongodb(?:\+srv)?://[^\s:@/'"`<>]+:[^\s@/'"`<>$%]{4,}@'''
+keywords = ["mongodb"]
+
+[allowlist]
+description = "test files with deliberately fake credentials"
+paths = [
+  '''^apps/api/src/security/redact\.test\.ts$''',
+  '''^apps/api/test/api\.test\.ts$''',
+  '''^apps/web/src/pages/sources/mongo-uri\.test\.ts$''',
+  '''^packages/database/src/roles\.test\.ts$''',
+  '''^packages/ingest/src/ingest\.test\.ts$''',
+  '''^packages/security/src/redact\.test\.ts$''',
+  '''^packages/telemetry/src/spans\.test\.ts$''',
+  '''^packages/telemetry/src/telemetry\.test\.ts$''',
+  '''^tests/e2e/specs/16-mongo-connection-string\.spec\.ts$''',
+  '''^tests/e2e/support/stack\.ts$''',
+  '''^infra/scripts/.*\.test\.mjs$''',
+  '''^pnpm-lock\.yaml$''',
+]
