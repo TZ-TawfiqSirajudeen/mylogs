@@ -14,7 +14,7 @@
 # started with Docker in the environment this repository was developed in (Docker was unavailable there).
 
 x-node-env: &node-env
-  MONGODB_URI: mongodb+srv://hariharanrpandi:Admin123@thetazero.urw0lat.mongodb.net/?retryWrites=true&w=majority
+  MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/?replicaSet=rs0}   # default: the bundled replica-set service below; set MONGODB_URI in your shell or a gitignored .env to use another cluster
   MONGODB_DB: nexus
   LOG_LEVEL: ${LOG_LEVEL:-info}
   # Dev conveniences. Both are refused when NODE_ENV=production.
@@ -31,9 +31,11 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
+        # Healthy only once this node is the writable PRIMARY (initiates the set on first start), so dependants never see "not primary".
         - >-
           mongosh --quiet --eval
-          "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}).ok }"
+          "try { rs.status() } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}) };
+          quit(db.hello().isWritablePrimary ? 0 : 1)"
       interval: 5s
       timeout: 10s
       retries: 20
@@ -73,7 +75,8 @@ services:
 
   web:
     build: { context: ., target: web }
-    depends_on: [api]
+    # nginx resolves `api` once at start-up: wait until the API is healthy (and has its final address), not merely started.
+    depends_on: { api: { condition: service_healthy } }
     ports: ["8080:8080"]
 
   # ------------------------------------------------------------------ profile: oidc
@@ -82,6 +85,8 @@ services:
     build: { context: ., target: mock-idp }
     environment:
       MOCK_IDP_PORT: "9000"
+      MOCK_IDP_HOST: 0.0.0.0
+      MOCK_IDP_PUBLIC_ORIGIN: ${MOCK_IDP_PUBLIC_ORIGIN:-http://mock-idp:9000}
       # The IdP's own URL as seen by BOTH the browser and the API container: map `mock-idp` to 127.0.0.1 in your hosts file,
       # or use a real provider. (The issuer is part of every token, so the two views must use the same name.)
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
@@ -95,7 +100,10 @@ services:
     image: otel/opentelemetry-collector-contrib:0.164.0
     command: ["--config=/etc/otelcol/config.yaml"]
     environment:
-      NEXUS_INGEST_TOKEN: ${NEXUS_INGEST_TOKEN:?create an ingest token in the UI (Data Sources > Ingestion) and export NEXUS_INGEST_TOKEN}
+      # Create the token in the UI (Data Sources > Ingestion) and export NEXUS_INGEST_TOKEN before starting this profile.
+      # Deliberately not "${VAR:?message}": compose interpolates the whole file, and a required variable here may stop the
+      # DEFAULT stack (no collector) from starting. Without a token the exporter's 401s are logged by the Collector.
+      NEXUS_INGEST_TOKEN: ${NEXUS_INGEST_TOKEN:-}
       NEXUS_INGEST_BASE_URL: http://ingest:4318
     volumes: [./infra/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro]
     ports: ["4317:4317", "14318:4318"] # OTLP gRPC / HTTP for your applications (HTTP on 14318 to avoid the ingest port)

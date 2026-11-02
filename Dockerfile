@@ -54,6 +54,9 @@ RUN pnpm --filter @nexus/api deploy --prod --legacy /out/api \
 FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
+# Directory for the development key-encryption key (docker-compose mounts a named volume here). Docker initialises a new named
+# volume with the image's ownership, so it must be owned by `node` BEFORE the user switch or the API cannot write kek.json.
+RUN mkdir -p /data/dev-secrets && chown -R node:node /data
 # Unprivileged user (uid 1000 from the base image); the root filesystem can be mounted read-only.
 USER node
 

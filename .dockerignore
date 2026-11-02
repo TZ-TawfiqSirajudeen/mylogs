@@ -1,13 +1,25 @@
+# Patterns are relative to the build-context ROOT: a bare name (".mongo-data") matches only at the root, so every
+# directory that can appear in any workspace package is spelled with "**/". infra/scripts/check-container-files.mjs
+# tests this file against real paths (nested KEK directory, MongoDB data files, .env files, logs).
 **/node_modules
 **/dist
 .git
-.env
-.env.*
-!.env.example
-.dev-secrets
-.mongo-data
+# Secrets and local state: never part of an image or of the build context sent to the daemon.
+**/.env
+**/.env.*
+!**/.env.example
+**/.dev-secrets
+**/.mongo-data
+# Test/dev artefacts
 coverage
-.vite
+**/.vite
 tests/e2e/.results
+**/test-results
+**/playwright-report
 **/*.log
+**/*.tsbuildinfo
 docs/performance-results.json
+# Tool and OS folders that sometimes appear inside the repository directory
+AppData
+.claude
+graphify-out

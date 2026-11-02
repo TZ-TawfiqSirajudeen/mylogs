@@ -29,7 +29,12 @@ NEXUS_INGEST_TOKEN=nxi_... docker compose --profile collector up otel-collector 
 The compose file is for development: demo data (`--seed`), throw-away key-encryption key, loopback egress allowed. It cannot be used as-is in production
 (the services refuse that configuration when `NODE_ENV=production`).
 
-Without Docker, see the README ("Local development") — every service runs directly with `tsx`.
+> **`MONGODB_URI` in compose.** The compose file defines a `mongo` service (single-node replica set `rs0`) that the other services wait for. `MONGODB_URI` now defaults to
+> `mongodb://mongo:27017/?replicaSet=rs0` and can be overridden from the environment (`${MONGODB_URI:-...}`). An earlier version of this file held a hosted-cluster URI with a real
+> credential; that value is gone from the working tree but is still in git history, so rotate it and purge it as described in
+> [runbooks/credential-rotation.md](runbooks/credential-rotation.md). The file has still never been run (no Docker on the development machine); CI runs it.
+
+Without Docker, see the README ("Local development") — every service runs directly with `tsx`, reading a gitignored root `.env` in development (production starts never read `.env`).
 
 ## Production checklist
 
