@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { loadConfig } from './config.js';
 
-const base = { MONGODB_URI: 'mongodb+srv://hariharanrpandi:Admin123@thetazero.urw0lat.mongodb.net/?retryWrites=true&w=majority' };
+const base = { MONGODB_URI: 'mongodb://127.0.0.1:27017/?replicaSet=testset' };
 const oidcEnv = { AUTH_MODE: 'oidc', OIDC_ISSUER: 'https://idp.example.com', OIDC_CLIENT_ID: 'nexus', OIDC_CLIENT_SECRET: 'super-secret-value' };
 
 describe('loadConfig', () => {
