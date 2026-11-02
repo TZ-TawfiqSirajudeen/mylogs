@@ -235,8 +235,8 @@ importers:
         specifier: ^6.0.0
         version: 6.0.0
       mongodb:
-        specifier: ^7.7.0
-        version: 7.7.0
+        specifier: ^7.8.0
+        version: 7.8.0
       mongodb-memory-server:
         specifier: ^11.3.0
         version: 11.3.0
@@ -326,8 +326,8 @@ importers:
         specifier: workspace:*
         version: link:../security
       mongodb:
-        specifier: ^7.7.0
-        version: 7.7.0
+        specifier: ^7.8.0
+        version: 7.8.0
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -401,8 +401,8 @@ importers:
         specifier: ^6.0.0
         version: 6.0.0
       mongodb:
-        specifier: ^7.7.0
-        version: 7.7.0
+        specifier: ^7.8.0
+        version: 7.8.0
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -429,8 +429,8 @@ importers:
         specifier: workspace:*
         version: link:../security
       mongodb:
-        specifier: ^7.7.0
-        version: 7.7.0
+        specifier: ^7.8.0
+        version: 7.8.0
     devDependencies:
       mongodb-memory-server:
         specifier: ^11.3.0
@@ -602,8 +602,8 @@ importers:
         specifier: ^1.64.1
         version: 1.64.1
       mongodb:
-        specifier: ^7.7.0
-        version: 7.7.0
+        specifier: ^7.8.0
+        version: 7.8.0
       mongodb-memory-server:
         specifier: ^11.3.0
         version: 11.3.0
@@ -2172,8 +2172,8 @@ packages:
       socks:
         optional: true
 
-  mongodb@7.7.0:
-    resolution: {integrity: sha512-XG1xXEqyouAV8GCb3PuRaujofeXKpAJAPvXYWZgHl6Dz4QHSJ1nRLl0+GpqaLTwKvC0RFE9truOur34RNFY1nw==}
+  mongodb@7.8.0:
+    resolution: {integrity: sha512-p2NKagbQ41+daACG/ZSvhTzeAo+DoEyWE9Cmpf/SyP3pTC43+X0mwKE/44PpKtCxp5wOxnXz+t2pXEZRSkt9Yg==}
     engines: {node: '>=20.19.0'}
     peerDependencies:
       '@aws-sdk/credential-providers': ^3.806.0
@@ -3895,7 +3895,7 @@ snapshots:
       bson: 7.3.3
       mongodb-connection-string-url: 7.0.2
 
-  mongodb@7.7.0:
+  mongodb@7.8.0:
     dependencies:
       '@mongodb-js/saslprep': 1.6.1
       bson: 7.3.3

@@ -14,7 +14,7 @@
     "@nexus/connector-sdk": "workspace:*",
     "@nexus/security": "workspace:*",
     "ioredis": "^6.0.0",
-    "mongodb": "^7.7.0",
+    "mongodb": "^7.8.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
