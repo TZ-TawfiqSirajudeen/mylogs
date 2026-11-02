@@ -13,7 +13,7 @@
     "@hookform/resolvers": "^6.0.1",
     "@nexus/contracts": "workspace:*",
     "@tanstack/react-query": "^5.105.0",
-    "@tanstack/react-virtual": "^3.14.23",
+    "@tanstack/react-virtual": "^3.14.24",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-hook-form": "^7.91.0",
