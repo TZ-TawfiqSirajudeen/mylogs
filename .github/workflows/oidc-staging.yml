@@ -1,0 +1,72 @@
+# Scripted pre-checks of single sign-on against a REAL identity provider (staging). Manual trigger only.
+#
+# What it automates: discovery document, issuer equality, JWKS, token-endpoint authentication method, client-id/secret probe, and the
+# redirect URIs to register (infra/scripts/oidc-staging-verify.mjs). What it CANNOT do: the interactive browser sign-in and the
+# provider-session / outage / rollback steps; those stay manual: docs/runbooks/oidc-staging-verification.md, steps 4-12.
+#
+# Configure in the repository (Settings > Environments > "staging", or repository-level):
+#   variables: OIDC_STAGING_ISSUER, OIDC_STAGING_CLIENT_ID, OIDC_STAGING_WEB_ORIGIN, OIDC_STAGING_AUTH_METHOD (optional expectation)
+#   secret:    OIDC_STAGING_CLIENT_SECRET (optional: without it the client-authentication probe is skipped)
+# The secret is exposed only to the single step that runs the script, which never prints it. Fork pull requests cannot trigger this.
+#
+# STATUS: not run (no access to GitHub Actions or a real provider from the development machine). The script's logic is unit-tested
+# against a local fake provider (`pnpm run test:infra`).
+name: OIDC staging verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment that holds the OIDC_STAGING_* variables and secret
+        required: false
+        default: staging
+        type: string
+      probe_client:
+        description: Send a token request with a deliberately invalid code to check the client id/secret (needs the secret)
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Pre-checks against the real provider
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check the configuration is present (names only, never values)
+        env:
+          ISSUER: ${{ vars.OIDC_STAGING_ISSUER }}
+          CLIENT_ID: ${{ vars.OIDC_STAGING_CLIENT_ID }}
+        run: |
+          missing=0
+          [ -n "$ISSUER" ] || { echo "::error::variable OIDC_STAGING_ISSUER is not set"; missing=1; }
+          [ -n "$CLIENT_ID" ] || { echo "::error::variable OIDC_STAGING_CLIENT_ID is not set"; missing=1; }
+          exit $missing
+
+      - name: Verify discovery, issuer, JWKS, auth method, client credentials
+        env:
+          OIDC_ISSUER: ${{ vars.OIDC_STAGING_ISSUER }}
+          OIDC_CLIENT_ID: ${{ vars.OIDC_STAGING_CLIENT_ID }}
+          WEB_ORIGIN: ${{ vars.OIDC_STAGING_WEB_ORIGIN }}
+          OIDC_AUTH_METHOD: ${{ vars.OIDC_STAGING_AUTH_METHOD }}
+          OIDC_CLIENT_SECRET: ${{ secrets.OIDC_STAGING_CLIENT_SECRET }}
+          OIDC_VERIFY_PROBE: ${{ inputs.probe_client }}
+        run: node infra/scripts/oidc-staging-verify.mjs
+
+      - name: Remaining manual steps
+        if: always()
+        run: |
+          {
+            echo '### Still manual (cannot be scripted)'
+            echo 'Interactive sign-in as invited / uninvited / e-mail-less users, cookie flags, claims, sign-out, outage and rollback: `docs/runbooks/oidc-staging-verification.md` steps 4 to 12.'
+            echo 'Record the sign-off (step 12) only after those pass; then update `docs/auth-oidc.md` "Verification status".'
+          } >> "$GITHUB_STEP_SUMMARY"
