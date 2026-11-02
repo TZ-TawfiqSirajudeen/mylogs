@@ -15,7 +15,9 @@ export interface ProjectAccess { role: ProjectRole; environmentIds: string[] | n
 export type OrgAction = 'project:create' | 'audit:read' | 'org:members:read' | 'org:members:manage';
 export type ProjectAction =
   | 'project:read' | 'project:update' | 'environment:manage' | 'member:manage'
-  | 'telemetry:read' | 'connection:manage' | 'incident:write';
+  | 'telemetry:read' | 'connection:manage' | 'incident:write'
+  /** Alert rules, incidents, channels and silences: everyone with project access may read; engineers act on incidents ('incident:write'); only admins configure ('alert:manage'). */
+  | 'alert:read' | 'alert:manage';
 
 const ORG_ACTIONS: Record<OrgRole, readonly OrgAction[]> = {
   owner: ['project:create', 'audit:read', 'org:members:read', 'org:members:manage'],
@@ -25,9 +27,9 @@ const ORG_ACTIONS: Record<OrgRole, readonly OrgAction[]> = {
 };
 
 const PROJECT_ACTIONS: Record<ProjectRole, readonly ProjectAction[]> = {
-  project_admin: ['project:read', 'project:update', 'environment:manage', 'member:manage', 'telemetry:read', 'connection:manage', 'incident:write'],
-  engineer: ['project:read', 'telemetry:read', 'incident:write'],
-  viewer: ['project:read', 'telemetry:read'],
+  project_admin: ['project:read', 'project:update', 'environment:manage', 'member:manage', 'telemetry:read', 'connection:manage', 'incident:write', 'alert:read', 'alert:manage'],
+  engineer: ['project:read', 'telemetry:read', 'incident:write', 'alert:read'],
+  viewer: ['project:read', 'telemetry:read', 'alert:read'],
 };
 
 export function canOrg(p: Principal, action: OrgAction): boolean {

@@ -1,4 +1,5 @@
 import type { Collection, Db } from 'mongodb';
+import type { AlertConfigDoc, AlertDeliveryDoc, IncidentDoc } from './alert-models.js';
 
 export type OrgRole = 'owner' | 'admin' | 'member' | 'auditor';
 export type ProjectRole = 'project_admin' | 'engineer' | 'viewer';
@@ -297,6 +298,10 @@ export interface Collections {
   metricPoints: Collection<MetricPointDoc>;
   metricRollups: Collection<MetricRollupDoc>;
   services: Collection<ServiceDoc>;
+  /** Alert rules, channels and silences (discriminated by `kind`); see alert-models.ts. */
+  alertConfig: Collection<AlertConfigDoc>;
+  incidents: Collection<IncidentDoc>;
+  alertDeliveries: Collection<AlertDeliveryDoc>;
 }
 
 export function collections(db: Db): Collections {
@@ -324,5 +329,8 @@ export function collections(db: Db): Collections {
     metricPoints: db.collection('metric_points'),
     metricRollups: db.collection('metric_rollups'),
     services: db.collection('services'),
+    alertConfig: db.collection('alert_config'),
+    incidents: db.collection('incidents'),
+    alertDeliveries: db.collection('alert_deliveries'),
   };
 }

@@ -85,3 +85,4 @@ export * from './connections.js';
 export * from './logs.js';
 export * from './traces.js';
 export * from './metrics.js';
+export * from './alerting.js';

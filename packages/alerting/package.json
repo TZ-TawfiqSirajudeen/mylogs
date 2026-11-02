@@ -1,0 +1,30 @@
+{
+  "name": "@nexus/alerting",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "bench": "tsx bench/bench.ts"
+  },
+  "dependencies": {
+    "@nexus/contracts": "workspace:*",
+    "@nexus/database": "workspace:*",
+    "@nexus/logstore": "workspace:*",
+    "@nexus/metricstore": "workspace:*",
+    "@nexus/secrets": "workspace:*",
+    "@nexus/security": "workspace:*",
+    "mongodb": "^7.7.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@nexus/telemetry": "workspace:*",
+    "mongodb-memory-server": "^11.3.0",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.5"
+  }
+}

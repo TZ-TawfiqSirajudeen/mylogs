@@ -6,6 +6,10 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { ApiRequestError } from './api';
 import './index.css';
 import { Layout } from './layout';
+import Alerts from './pages/alerts/Alerts';
+import Channels from './pages/alerts/Channels';
+import IncidentDetailPage from './pages/alerts/IncidentDetail';
+import Incidents from './pages/alerts/Incidents';
 import Audit from './pages/Audit';
 import Login from './pages/Login';
 import Logs from './pages/Logs';
@@ -52,6 +56,10 @@ createRoot(document.getElementById('root')!).render(
                 <Route path="services" element={<Services />} />
                 <Route path="services/:service" element={<ServiceDetail />} />
                 <Route path="metrics" element={<Metrics />} />
+                <Route path="alerts" element={<Alerts />} />
+                <Route path="alerts/channels" element={<Channels />} />
+                <Route path="incidents" element={<Incidents />} />
+                <Route path="incidents/:incidentId" element={<IncidentDetailPage />} />
                 <Route path="audit" element={<Audit />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="*" element={<NotImplemented />} />

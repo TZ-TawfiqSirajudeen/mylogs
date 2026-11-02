@@ -18,7 +18,7 @@ export interface Client {
   req(method: string, url: string, body?: unknown, headers?: Record<string, string>): Promise<{ status: number; json: any; headers: Record<string, unknown> }>;
 }
 
-export async function harness(mongoUri: string, env: Record<string, string> = {}, deps: { logStream?: { write(msg: string): void } } = {}): Promise<Harness> {
+export async function harness(mongoUri: string, env: Record<string, string> = {}, deps: Parameters<typeof buildApp>[2] = {}): Promise<Harness> {
   const cfg = loadConfig({
     NODE_ENV: 'test', MONGODB_URI: mongoUri, AUTH_MODE: 'dev', LOG_LEVEL: 'silent',
     RATE_LIMIT_MAX: '10000', AUTH_RATE_LIMIT_MAX: '10000',

@@ -185,6 +185,40 @@ export const migrations: Migration[] = [
     },
   },
   {
+    // Version 20 (not the next free number) so that migrations added concurrently by other work streams (7..19) never collide with it.
+    version: 20,
+    name: 'alerting-and-incidents',
+    async up(db) {
+      for (const name of ['alert_config', 'incidents', 'alert_deliveries']) await db.createCollection(name).catch(() => undefined);
+      const cfg = db.collection('alert_config');
+      // Rules and channels have a name that is unique per project and kind (silences have none).
+      await cfg.createIndex({ orgId: 1, projectId: 1, kind: 1, nameLower: 1 }, { name: 'acfg_name_uq', unique: true, partialFilterExpression: { nameLower: { $exists: true } } });
+      await cfg.createIndex({ orgId: 1, projectId: 1, kind: 1, createdAt: -1, _id: -1 }, { name: 'acfg_scope_kind' });
+      // The evaluation scheduler only ever scans enabled rules, oldest due first.
+      await cfg.createIndex({ nextEvalAt: 1 }, { name: 'acfg_rule_due', partialFilterExpression: { kind: 'rule', enabled: true } });
+      await cfg.createIndex({ expireAt: 1 }, { name: 'acfg_silence_ttl', expireAfterSeconds: 0 });
+      const inc = db.collection('incidents');
+      // THE deduplication invariant: at most one live (not resolved) incident per rule and group, enforced by the database.
+      await inc.createIndex({ orgId: 1, projectId: 1, ruleId: 1, groupKey: 1 }, { name: 'inc_active_uq', unique: true, partialFilterExpression: { active: true } });
+      await inc.createIndex({ orgId: 1, projectId: 1, openedAt: -1, _id: -1 }, { name: 'inc_scope_opened' });
+      await inc.createIndex({ orgId: 1, projectId: 1, status: 1, openedAt: -1, _id: -1 }, { name: 'inc_scope_status' });
+      await inc.createIndex({ orgId: 1, projectId: 1, ruleId: 1, openedAt: -1 }, { name: 'inc_rule' });
+      await inc.createIndex({ expireAt: 1 }, { name: 'inc_ttl', expireAfterSeconds: 0 });
+      const del = db.collection('alert_deliveries');
+      await del.createIndex({ nextAttemptAt: 1 }, { name: 'adel_due', partialFilterExpression: { status: 'pending' } });
+      await del.createIndex({ orgId: 1, projectId: 1, incidentId: 1, createdAt: 1 }, { name: 'adel_incident' });
+      await del.createIndex({ orgId: 1, projectId: 1, channelId: 1, createdAt: -1 }, { name: 'adel_channel_created' });
+      await del.createIndex({ expireAt: 1 }, { name: 'adel_ttl', expireAfterSeconds: 0 });
+    },
+    async down(db) {
+      for (const [c, n] of [
+        ['alert_config', 'acfg_name_uq'], ['alert_config', 'acfg_scope_kind'], ['alert_config', 'acfg_rule_due'], ['alert_config', 'acfg_silence_ttl'],
+        ['incidents', 'inc_active_uq'], ['incidents', 'inc_scope_opened'], ['incidents', 'inc_scope_status'], ['incidents', 'inc_rule'], ['incidents', 'inc_ttl'],
+        ['alert_deliveries', 'adel_due'], ['alert_deliveries', 'adel_incident'], ['alert_deliveries', 'adel_channel_created'], ['alert_deliveries', 'adel_ttl'],
+      ] as const) await db.collection(c).dropIndex(n).catch(() => undefined);
+    },
+  },
+  {
     // Version numbers are not contiguous on purpose: parallel work streams reserve their own (20 = alerting, 30 = metric rollups); see ADR-0007.
     version: 30,
     name: 'metric-rollups',

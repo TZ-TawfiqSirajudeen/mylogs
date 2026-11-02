@@ -37,9 +37,11 @@ test('rollback reverts the newest migration first; re-applying restores them in 
   expect(await names('logs')).toContain('logs_scope_ts_search');
   expect(await names('logs')).not.toContain('logs_scope_ts'); // v5 replaced it
   expect(await names('spans')).toContain('spans_scope_trace');
+  expect(await names('incidents')).toContain('inc_active_uq');
   // migrations newer than v6 (alerting is v20, others may follow) are rolled back newest first, whatever their number
   for (const v of migrations.map((m) => m.version).filter((x) => x > 6).sort((a, b) => b - a)) {
     expect(await migrateDownOne(database.db)).toBe(v);
+    if (v === 20) expect(await names('incidents')).not.toContain('inc_active_uq'); // alerting (ADR-0006): the dedup index goes with its migration
   }
   expect(await migrateDownOne(database.db)).toBe(6);
   expect(await names('spans')).not.toContain('spans_scope_trace');

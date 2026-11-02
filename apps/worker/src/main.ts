@@ -1,8 +1,10 @@
 import http from 'node:http';
 import { hostname } from 'node:os';
+import { AlertWorker } from '@nexus/alerting';
 import { ConnectionService } from '@nexus/connections';
 import { createDefaultRegistry } from '@nexus/connectors';
 import { AuditService, connectDatabase } from '@nexus/database';
+import { MongoLogStore } from '@nexus/logstore';
 import { connectorMetricSink, MongoMetricStore, startRollupCompactor } from '@nexus/metricstore';
 import { loadKeyring, SecretStore } from '@nexus/secrets';
 import { parseNetworkPolicy } from '@nexus/security';
@@ -21,6 +23,13 @@ const Env = z.object({
   NETWORK_ALLOW_INSECURE_HTTP: z.string().optional(),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(8),
   WORKER_TICK_MS: z.coerce.number().int().min(500).max(60_000).default(5_000),
+  /** Alert evaluation and notification scheduling (ADR-0006). `ALERTING_ENABLED=false` turns the engine off on this worker. */
+  ALERTING_ENABLED: z.enum(['true', 'false']).default('true'),
+  ALERT_TICK_MS: z.coerce.number().int().min(500).max(60_000).default(2_000),
+  ALERT_MAX_RULES_PER_TICK: z.coerce.number().int().min(1).max(500).default(50),
+  ALERT_RULE_BUDGET_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  /** Used only to put a link to the incident in notifications. */
+  WEB_ORIGIN: z.string().url().optional(),
   WORKER_HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(4100),
   WORKER_HEALTH_HOST: z.string().default('127.0.0.1'),
   CONNECTION_TEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
@@ -58,13 +67,20 @@ async function main() {
       res.writeHead(ok ? 200 : 503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: ok ? 'ready' : 'degraded', scheduler: worker.isAlive(), mongodb: ok }));
       return;
     }
-    if (req.url === '/metrics') { res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }).end(worker.prometheus()); return; }
+    if (req.url === '/metrics') { res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }).end(worker.prometheus() + (alerts?.prometheus() ?? '')); return; }
     res.writeHead(404).end();
   });
   await new Promise<void>((r) => health.listen(e.WORKER_HEALTH_PORT, e.WORKER_HEALTH_HOST, r));
 
+  const alerts = e.ALERTING_ENABLED === 'true'
+    ? new AlertWorker(db, { metrics: new MongoMetricStore(db), logs: new MongoLogStore(db), secrets: new SecretStore(db, keyring) }, {
+      owner: `${hostname()}:${process.pid}`, tickMs: e.ALERT_TICK_MS, policy: network, publicUrl: e.WEB_ORIGIN ?? null,
+      engine: { maxRulesPerTick: e.ALERT_MAX_RULES_PER_TICK, ruleBudgetMs: e.ALERT_RULE_BUDGET_MS }, log: (level, msg, fields) => log(level, msg, fields),
+    })
+    : null;
   worker.start();
   const stopRollups = e.METRIC_ROLLUP_INTERVAL_MS > 0 ? startRollupCompactor(db, { intervalMs: e.METRIC_ROLLUP_INTERVAL_MS, owner: `${hostname()}:${process.pid}`, log: (level, msg, fields) => log(level, msg, fields) }) : async () => undefined;
+  alerts?.start();
   log('info', 'worker started', { concurrency: e.WORKER_CONCURRENCY, tickMs: e.WORKER_TICK_MS, healthPort: e.WORKER_HEALTH_PORT });
 
   let closing = false;
@@ -74,6 +90,7 @@ async function main() {
     log('info', 'shutting down', { signal });
     const { drained } = await worker.stop(15_000);
     if (!drained) log('warn', 'shutdown grace period elapsed with checks still running; their leases will expire');
+    await alerts?.stop(15_000);
     await stopRollups();
     health.close();
     await db.close();

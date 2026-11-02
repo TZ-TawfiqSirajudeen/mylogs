@@ -11,10 +11,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@nexus/alerting": "workspace:*",
     "@nexus/connections": "workspace:*",
     "@nexus/connector-sdk": "workspace:*",
     "@nexus/connectors": "workspace:*",
     "@nexus/database": "workspace:*",
+    "@nexus/logstore": "workspace:*",
     "@nexus/metricstore": "workspace:*",
     "@nexus/secrets": "workspace:*",
     "@nexus/security": "workspace:*",

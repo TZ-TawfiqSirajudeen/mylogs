@@ -4,6 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
+import { createAlertingServices, type WebhookSender } from '@nexus/alerting';
 import { ConnectionService, ServiceError } from '@nexus/connections';
 import { createDefaultRegistry } from '@nexus/connectors';
 import type { Database } from '@nexus/database';
@@ -22,6 +23,7 @@ import authPlugin from './plugins/auth.js';
 import { OidcService } from './auth/oidc.js';
 import { authRoutes } from './routes/auth.js';
 import { oidcRoutes } from './routes/oidc.js';
+import { alertingRoutes } from './routes/alerting.js';
 import { connectionRoutes } from './routes/connections.js';
 import { orgRoutes } from './routes/org.js';
 import { projectRoutes } from './routes/projects.js';
@@ -41,7 +43,7 @@ declare module 'fastify' {
   interface FastifyInstance { routeTable: RouteInfo[] }
 }
 
-export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyring; logStream?: { write(msg: string): void }; traceStore?: TraceStore; metricStore?: MetricStore } = {}) {
+export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyring; logStream?: { write(msg: string): void }; traceStore?: TraceStore; metricStore?: MetricStore; webhookSender?: WebhookSender } = {}) {
   const app = Fastify({
     logger: {
       level: cfg.logLevel,
@@ -106,7 +108,7 @@ export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyr
 
   if (cfg.env !== 'production') {
     await app.register(swagger, {
-      openapi: { info: { title: 'Nexus Observability API', version: '0.1.0' }, tags: [{ name: 'auth' }, { name: 'projects' }, { name: 'environments' }, { name: 'members' }, { name: 'audit' }, { name: 'connectors' }, { name: 'connections' }, { name: 'logs' }, { name: 'ingestion' }] },
+      openapi: { info: { title: 'Nexus Observability API', version: '0.1.0' }, tags: [{ name: 'auth' }, { name: 'projects' }, { name: 'environments' }, { name: 'members' }, { name: 'audit' }, { name: 'connectors' }, { name: 'connections' }, { name: 'logs' }, { name: 'ingestion' }, { name: 'alerting' }, { name: 'incidents' }] },
       transform: jsonSchemaTransform,
     });
     await app.register(swaggerUi, { routePrefix: '/docs' });
@@ -148,5 +150,7 @@ export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyr
   await app.register(observabilityRoutes({ db, traces: traceStore, metrics: metricStore, authorize, monitor, cookieName: app.cookieName }));
   await app.register(telemetryRoutes({ db, projects, store: logStore, tokens: new IngestTokenService(db, audit), audit, cookieName: app.cookieName, ingestPublicUrl: cfg.ingestPublicUrl }));
   await app.register(connectionRoutes({ projects, connections, registry, cookieName: app.cookieName }));
+  const alerting = createAlertingServices(db, audit, new SecretStore(db, keyring), cfg.network, { publicUrl: cfg.webOrigin, ...(deps.webhookSender ? { sender: deps.webhookSender } : {}) });
+  await app.register(alertingRoutes({ projects, alerting, cookieName: app.cookieName }));
   return app;
 }

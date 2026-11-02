@@ -1,7 +1,7 @@
 import type { SessionInfo } from '@nexus/contracts';
 
 export class ApiRequestError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string, readonly requestId?: string) {
+  constructor(readonly status: number, readonly code: string, message: string, readonly requestId?: string, readonly details?: unknown) {
     super(message);
   }
 }
@@ -22,7 +22,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   const json = await res.json().catch(() => null);
   if (!res.ok) {
     const e = json?.error;
-    throw new ApiRequestError(res.status, e?.code ?? 'error', e?.message ?? `Request failed (${res.status})`, e?.requestId);
+    throw new ApiRequestError(res.status, e?.code ?? 'error', e?.message ?? `Request failed (${res.status})`, e?.requestId, e?.details);
   }
   return json as T;
 }

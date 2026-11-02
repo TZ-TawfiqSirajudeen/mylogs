@@ -1,0 +1,71 @@
+{
+  "measuredAt": "2026-11-02T05:41:09.441Z",
+  "node": "v22.17.0",
+  "platform": "win32 x64",
+  "dataset": {
+    "projects": 10,
+    "rules": 1000,
+    "seriesPerProject": 20,
+    "minutes": 60,
+    "logsPerProject": 5000
+  },
+  "results": [
+    {
+      "concurrency": 1,
+      "workers": 1,
+      "rules": 1000,
+      "errors": 0,
+      "seconds": 33.28,
+      "rulesPerSecond": 30,
+      "storeQueryMsP50": 5.8,
+      "storeQueryMsP95": 19.1,
+      "storeQueryMsMax": 73.8,
+      "tickMsP50": 1698,
+      "tickMsMax": 1798,
+      "ticks": 20
+    },
+    {
+      "concurrency": 4,
+      "workers": 1,
+      "rules": 1000,
+      "errors": 0,
+      "seconds": 10.76,
+      "rulesPerSecond": 92.9,
+      "storeQueryMsP50": 8.5,
+      "storeQueryMsP95": 28,
+      "storeQueryMsMax": 82.7,
+      "tickMsP50": 537,
+      "tickMsMax": 725,
+      "ticks": 20
+    },
+    {
+      "concurrency": 8,
+      "workers": 1,
+      "rules": 1000,
+      "errors": 0,
+      "seconds": 8.65,
+      "rulesPerSecond": 115.6,
+      "storeQueryMsP50": 18.8,
+      "storeQueryMsP95": 53.4,
+      "storeQueryMsMax": 132.6,
+      "tickMsP50": 393,
+      "tickMsMax": 693,
+      "ticks": 20
+    },
+    {
+      "concurrency": 4,
+      "workers": 2,
+      "rules": 1000,
+      "errors": 0,
+      "seconds": 7.83,
+      "rulesPerSecond": 127.6,
+      "storeQueryMsP50": 13.5,
+      "storeQueryMsP95": 39.8,
+      "storeQueryMsMax": 135.4,
+      "tickMsP50": 727,
+      "tickMsMax": 1043,
+      "ticks": 10
+    }
+  ],
+  "note": "At 115.6 rules/s (best single-worker setting) one worker can sustain about 6936 rules at a 60 s interval or 1734 at 15 s (evaluation only, in-memory mongod on the same host, idle machine)."
+}

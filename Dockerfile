@@ -35,6 +35,7 @@ COPY packages/telemetry/package.json packages/telemetry/package.json
 COPY packages/logstore/package.json packages/logstore/package.json
 COPY packages/tracestore/package.json packages/tracestore/package.json
 COPY packages/metricstore/package.json packages/metricstore/package.json
+COPY packages/alerting/package.json packages/alerting/package.json
 COPY packages/ingest/package.json packages/ingest/package.json
 COPY packages/mock-idp/package.json packages/mock-idp/package.json
 COPY tests/e2e/package.json tests/e2e/package.json

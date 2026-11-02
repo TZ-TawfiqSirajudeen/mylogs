@@ -52,3 +52,17 @@ describe('project access', () => {
     expect(canAccessEnvironment(null, 'e1')).toBe(false);
   });
 });
+
+describe('alerting actions (ADR-0006)', () => {
+  const matrix = [
+    ['viewer', 'alert:read', true], ['viewer', 'incident:write', false], ['viewer', 'alert:manage', false],
+    ['engineer', 'alert:read', true], ['engineer', 'incident:write', true], ['engineer', 'alert:manage', false],
+    ['project_admin', 'alert:read', true], ['project_admin', 'incident:write', true], ['project_admin', 'alert:manage', true],
+  ] as const;
+  test.each(matrix)('%s %s -> %s', (role, action, expected) => expect(canProject({ role, environmentIds: null }, action)).toBe(expected));
+  test('an org auditor without a grant has no alerting access, an org admin has all of it', () => {
+    expect(canProject(resolveProjectAccess(p('auditor'), null), 'alert:read')).toBe(false);
+    expect(canProject(resolveProjectAccess(p('admin'), null), 'alert:manage')).toBe(true);
+    expect(canProject(resolveProjectAccess(p('member'), null), 'alert:read')).toBe(false);
+  });
+});

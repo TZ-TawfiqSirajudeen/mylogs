@@ -4,3 +4,4 @@ export * from './migrations.js';
 export type { ClientSession } from 'mongodb';
 export * from './audit.js';
 export * from './search-text.js';
+export * from './alert-models.js';
