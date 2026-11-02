@@ -136,7 +136,7 @@ cross-environment or cross-project rules · webhook body templating · recurring
 log counts use event time; a metric that did not report looks like "no data"; missed evaluations (worker down) are not replayed; the window is up to a minute longer than configured.
 
 ### Measured limits
-Collections: 3 new (`alert_config`, `incidents`, `alert_deliveries`); Atlas free tier counts: 22 declared + `schema_migrations` + 3 = **26 of 500**.
+Collections: 3 new (`alert_config`, `incidents`, `alert_deliveries`); Atlas free tier counts: 22 declared + `schema_migrations` + 3 = 26 of 500 when this was measured; with the `metric_rollups` collection (ADR-0007) Nexus now declares 26 + `schema_migrations` = **27 of 500**.
 Evaluation throughput (one worker, in-memory `mongod` on the same laptop, real metric and log stores; reproduce with `pnpm --filter @nexus/alerting bench`; raw numbers in [performance-alerting.json](performance-alerting.json)):
 
 Dataset: 1,000 rules (70 % metric, 30 % log; 20 % of the metric rules grouped by service) over 10 projects, each with 20 series x 60 minutes of metrics and 5,000 log records, 15-minute windows; no rule fires (state writes only).
