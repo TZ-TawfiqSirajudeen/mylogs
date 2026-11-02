@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager" (pnpm@10.13.1)
 
@@ -88,7 +88,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the whole history is scanned
       - uses: actions/setup-node@v4
@@ -121,7 +121,7 @@ jobs:
           - { target: web, entry: /usr/share/nginx/html/index.html }
           - { target: mock-idp, entry: /repo/packages/mock-idp/src/cli.ts }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Canaries: plant fake "secret" files where a developer's machine has the real ones. They are random and worthless. If .dockerignore
       # works, none of them can end up in any image; the check below greps the image filesystem for the canary value.
@@ -186,7 +186,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: docker compose config (default, oidc and collector profiles)
         run: |
