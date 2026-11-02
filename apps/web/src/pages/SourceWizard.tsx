@@ -267,9 +267,9 @@ export default function SourceWizard() {
 
         {step === 9 && (
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="space-y-1 text-sm"><span className="font-medium">Health-check interval (seconds, 30–3600)</span><input type="number" min={30} max={3600} className={field} value={settings.pollIntervalSeconds} onChange={(e) => setSettings({ ...settings, pollIntervalSeconds: Number(e.target.value) })} /></label>
+            <label className="space-y-1 text-sm"><span className="font-medium">Check and collection interval (seconds, 30–3600)</span><input type="number" min={30} max={3600} className={field} value={settings.pollIntervalSeconds} onChange={(e) => setSettings({ ...settings, pollIntervalSeconds: Number(e.target.value) })} /></label>
             <label className="space-y-1 text-sm"><span className="font-medium">Sampling (0.01–1)</span><input type="number" step={0.01} min={0.01} max={1} className={field} value={settings.sampling} onChange={(e) => setSettings({ ...settings, sampling: Number(e.target.value) })} />
-              <span className="block text-xs text-slate-500">Sampling removes evidence that incident investigation may need. Keep 1 unless volume forces otherwise.</span></label>
+              <span className="block text-xs text-slate-500">Sampling removes evidence that incident investigation may need. Keep 1 unless volume forces otherwise. (It does not apply to metrics read from databases.)</span></label>
             <label className="space-y-1 text-sm"><span className="font-medium">Retention (days, 1–365)</span><input type="number" min={1} max={365} className={field} value={settings.retentionDays} onChange={(e) => setSettings({ ...settings, retentionDays: Number(e.target.value) })} /></label>
             <div className="space-y-1 text-sm"><label className="flex items-center gap-2"><input type="checkbox" checked={settings.redactionEnabled} onChange={(e) => setSettings({ ...settings, redactionEnabled: e.target.checked })} />Redact sensitive fields</label>
               <input className={field} placeholder="extra field names, comma separated" value={settings.extraKeys} onChange={(e) => setSettings({ ...settings, extraKeys: e.target.value })} /></div>

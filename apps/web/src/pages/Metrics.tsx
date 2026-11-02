@@ -81,7 +81,7 @@ function Body({ projectId }: { projectId: string }) {
       {names.isError && <ErrorState error={names.error} onRetry={() => void names.refetch()} />}
       {names.data && names.data.length === 0 && (
         <EmptyState title="No metrics have been received" action={<Link className="text-indigo-700 underline dark:text-indigo-300" to="/sources?tab=ingestion">Set up ingestion</Link>}>
-          Metrics appear after an OpenTelemetry SDK or Collector sends OTLP metrics (gauge, sum, or histogram) to <code className="font-mono">/v1/metrics</code> with a token that includes the “metrics” signal.
+          Metrics appear after an OpenTelemetry SDK or Collector sends OTLP metrics (gauge, sum, or histogram) to <code className="font-mono">/v1/metrics</code> with a token that includes the “metrics” signal, or after a connected MongoDB or Redis <Link className="text-indigo-700 underline dark:text-indigo-300" to="/sources">data source</Link> (with the metrics signal selected) is collected.
         </EmptyState>
       )}
       {names.data && names.data.length > 0 && (
@@ -118,6 +118,12 @@ function Body({ projectId }: { projectId: string }) {
             </div>
           </form>
 
+          {labels.data?.find((l) => l.key === 'nexus.source')?.values.includes('connector') && (
+            <p role="note" data-testid="connector-metric-note" className="rounded border border-sky-300 bg-sky-50 p-2 text-sm dark:border-sky-900 dark:bg-sky-950/40">
+              This metric is read by a <strong>data-source connector</strong> (read-only) from {(labels.data.find((l) => l.key === 'nexus.connection.name')?.values ?? []).join(', ') || 'a connected database'}, not sent by an instrumented application: it has no service, traces or exemplars. Filter on <code className="font-mono">nexus.connection.name</code> to see one connection.{' '}
+              <Link className="text-indigo-700 underline dark:text-indigo-300" to="/sources">Data Sources</Link>
+            </p>
+          )}
           {result.isError && <ErrorState error={result.error} onRetry={() => result.mutate()} />}
           {result.isPending && <Loading label="Running query…" />}
           {r && (

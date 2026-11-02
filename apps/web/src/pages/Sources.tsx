@@ -46,6 +46,11 @@ function RotateDialog({ conn, projectId, descriptor, onClose }: { conn: Connecti
   );
 }
 
+const COLLECTION_LABEL: Record<ConnectionDto['collection']['status'], string> = {
+  not_implemented: 'Not collected (connector does not collect)', not_selected: 'Not collected (metrics not selected)', not_started: 'Waiting for first collection',
+  running: 'Collecting metrics', stopped: 'Stopped (see below)',
+};
+
 function ConnectionCard({ conn, projectId, envName, descriptor, canManage }: { conn: ConnectionDto; projectId: string; envName: string; descriptor?: ConnectorDescriptorDto | undefined; canManage: boolean }) {
   const qc = useQueryClient();
   const [rotating, setRotating] = useState(false);
@@ -80,8 +85,9 @@ function ConnectionCard({ conn, projectId, envName, descriptor, canManage }: { c
         <div><dt className="text-xs text-slate-500">Last check (UTC)</dt><dd>{fmtTime(h.lastCheckAt)}</dd></div>
         <div><dt className="text-xs text-slate-500">Last successful check</dt><dd>{fmtTime(h.lastSuccessAt)}</dd></div>
         <div><dt className="text-xs text-slate-500">Next check</dt><dd>{fmtTime(h.nextCheckAt)}</dd></div>
-        <div><dt className="text-xs text-slate-500">Collection lag</dt><dd>{h.collectionLagSeconds === null ? 'n/a — nothing is collected yet' : `${h.collectionLagSeconds}s`}</dd></div>
-        <div><dt className="text-xs text-slate-500">Last successful collection</dt><dd>{fmtTime(conn.collection.lastSuccessfulCollectionAt)}</dd></div>
+        <div><dt className="text-xs text-slate-500">Collection</dt><dd data-testid="collection-status">{COLLECTION_LABEL[conn.collection.status]}</dd></div>
+        <div><dt className="text-xs text-slate-500">Collection lag</dt><dd>{h.collectionLagSeconds === null ? 'n/a — nothing has been collected' : `${h.collectionLagSeconds}s`}</dd></div>
+        <div><dt className="text-xs text-slate-500">Last successful collection (UTC)</dt><dd data-testid="collection-last-success">{fmtTime(conn.collection.lastSuccessfulCollectionAt)}</dd></div>
         <div><dt className="text-xs text-slate-500">Consecutive failures</dt><dd>{h.consecutiveFailures}</dd></div>
         <div><dt className="text-xs text-slate-500">Capabilities detected</dt><dd>{available} of {conn.capabilities.length}</dd></div>
         <div><dt className="text-xs text-slate-500">Credentials</dt><dd>{Object.keys(conn.secrets).length ? `${Object.keys(conn.secrets).join(', ')} (stored, write-only)` : 'none stored'}</dd></div>
@@ -92,7 +98,26 @@ function ConnectionCard({ conn, projectId, envName, descriptor, canManage }: { c
           <span className="font-medium">{h.lastError?.message}</span><br />How to fix: {h.remediation}
         </p>
       )}
-      <p className="mt-3 text-xs text-slate-500">{conn.collection.note}</p>
+      {conn.selection && conn.selection.resources.length > 0 && (
+        <div data-testid="selected-resources" className="mt-3 rounded border border-slate-200 p-2 text-sm dark:border-slate-800">
+          <p className="text-xs font-semibold uppercase text-slate-500">Chosen in setup · signals: {conn.selection.signals.join(', ') || 'none'}</p>
+          <ul className="mt-1 flex flex-wrap gap-1.5">
+            {conn.selection.resources.map((r) => <li key={r.id} className="rounded bg-slate-100 px-2 py-0.5 text-xs dark:bg-slate-800" title={r.id}>{r.name} <span className="text-slate-600 dark:text-slate-300">({r.type.replace(/^mongodb_|^redis_/, '')})</span></li>)}
+          </ul>
+        </div>
+      )}
+      <p className="mt-3 text-xs text-slate-500" data-testid="collection-note">{conn.collection.note}</p>
+      {conn.collection.status === 'running' && conn.collection.notes.length > 0 && (
+        <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-800 dark:text-amber-300" data-testid="collection-notes">{conn.collection.notes.map((n) => <li key={n}>{n}</li>)}</ul>
+      )}
+      {conn.collection.status === 'stopped' && conn.collection.lastError && (
+        <p role="status" className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-sm dark:border-amber-900 dark:bg-amber-950/40">
+          <span className="font-medium">{conn.collection.lastError.message}</span> ({conn.collection.consecutiveFailures} failed attempt{conn.collection.consecutiveFailures === 1 ? '' : 's'})<br />How to fix: {conn.collection.lastError.remediation}
+        </p>
+      )}
+      {conn.collection.status === 'running' && (
+        <p className="mt-1 text-xs"><Link className="text-indigo-700 underline dark:text-indigo-300" to={`/metrics?p=${projectId}&metric=${conn.connectorType === 'redis' ? 'redis.clients.connected' : 'mongodb.connections.current'}&agg=last&f=${encodeURIComponent(`nexus.connection.name~${conn.name}`)}`}>See its metrics</Link></p>
+      )}
       <div className="mt-2"><SignalSummary signals={conn.signals} /></div>
 
       <details className="mt-3 text-sm">
@@ -124,7 +149,7 @@ function Matrix({ list }: { list: ConnectorDescriptorDto[] }) {
           {list.map((d) => (
             <tr key={d.type}>
               <td className="px-3 py-2 font-medium">{d.displayName}<div className="text-xs font-normal text-slate-500">{d.deploymentTypes.join('; ')}</div></td>
-              <td className="px-3 py-2"><Badge tone={d.status === 'implemented' ? 'info' : 'warn'}>{d.status}</Badge><div className="mt-1 text-xs text-slate-500">{d.mode === 'push' ? 'push: logs via ingestion token' : d.collection === 'implemented' ? 'collects telemetry' : 'health/discovery only'}</div></td>
+              <td className="px-3 py-2"><Badge tone={d.status === 'implemented' ? 'info' : 'warn'}>{d.status}</Badge><div className="mt-1 text-xs text-slate-500">{d.mode === 'push' ? 'push: logs via ingestion token' : d.collection === 'implemented' ? 'collects metrics (read-only)' : 'health/discovery only'}</div></td>
               <td className="px-3 py-2"><SignalSummary signals={d.signals} /></td>
               <td className="px-3 py-2">{d.authMethods.map((a) => <div key={a.id}>{a.label}{a.recommended && ' ★'}</div>)}</td>
               <td className="px-3 py-2 text-xs">{d.requiredPermissions.filter((p) => !p.optional).map((p) => <div key={p.permission}>{p.permission}</div>)}</td>
@@ -173,7 +198,7 @@ export default function Sources() {
           {project && conns.isError && <ErrorState error={conns.error} onRetry={() => void conns.refetch()} />}
           {project && conns.data?.length === 0 && (
             <EmptyState title="No data sources connected" action={canManage ? <Link className="text-indigo-600 underline" to="/sources/new">Add the first data source</Link> : undefined}>
-              Connect an application health check, MongoDB or Redis. Telemetry collection is not implemented yet, so a connected source is verified and monitored for health only.
+              Connect an application health check, MongoDB or Redis. MongoDB and Redis connections also collect read-only metrics for what you select (see the Metrics page); the application health check is verified and monitored for health only.
             </EmptyState>
           )}
           <ul className="space-y-3">

@@ -5,7 +5,7 @@ const state = (card: import('@playwright/test').Locator, s: string) => expect(ca
 const next = (page: import('@playwright/test').Page) => page.getByRole('button', { name: 'Next' });
 
 test.describe('data sources: capability matrix and the 12-step wizard', () => {
-  test('capability matrix is honest: implemented vs planned, nothing collects telemetry', async ({ page }) => {
+  test('capability matrix is honest: implemented vs planned; only MongoDB and Redis sample metrics', async ({ page }) => {
     await login(page, DEMO.owner);
     await page.goto('/sources');
     await page.getByRole('tab', { name: 'Capability matrix' }).click();
@@ -21,6 +21,10 @@ test.describe('data sources: capability matrix and the 12-step wizard', () => {
     for (const row of ['AWS CloudWatch', 'Azure Monitor', 'Kubernetes clusters', 'Nginx access/error logs']) {
       await expect(table.getByRole('row').filter({ hasText: row })).toContainText('planned');
     }
+    // Only the two database connectors sample metrics (read-only); the health check and every planned connector do not.
+    for (const row of ['MongoDB', 'Redis / Redis-compatible']) await expect(table.getByRole('row').filter({ hasText: row })).toContainText('collects metrics (read-only)');
+    await expect(table.getByText('collects metrics (read-only)')).toHaveCount(2);
+    await expect(table.getByRole('row').filter({ hasText: 'Authenticated application health check' })).toContainText('health/discovery only');
     await expect(table.getByText('collects telemetry')).toHaveCount(0);
     await expect(page.getByText(/log ingestion is push-based via ingestion tokens/)).toBeVisible();
   });
@@ -125,15 +129,15 @@ test.describe('data sources: capability matrix and the 12-step wizard', () => {
     await page.getByRole('button', { name: 'Save selection' }).click();
     await expect(page.getByText(/Selection saved: 1 resource\(s\), signals metrics/)).toBeVisible();
     await next(page).click();
-    await page.getByLabel('Health-check interval (seconds, 30–3600)').fill('5');
+    await page.getByLabel('Check and collection interval (seconds, 30–3600)').fill('5');
     await page.getByRole('button', { name: 'Save settings' }).click();
     await expect(page.getByRole('alert')).toBeVisible(); // out of bounds is refused by the server
-    await page.getByLabel('Health-check interval (seconds, 30–3600)').fill('45');
+    await page.getByLabel('Check and collection interval (seconds, 30–3600)').fill('45');
     await page.getByRole('button', { name: 'Save settings' }).click();
     await expect(page.getByText('Saved.')).toBeVisible();
     await next(page).click();
     await expect(page.getByText('Health check every 45s')).toBeVisible();
-    await expect(page.getByText('Not collected (not implemented yet)')).toBeVisible();
+    await expect(page.getByText('Not collected (not implemented for this connector)')).toBeVisible();
     await expect(page.getByText(/no telemetry will be collected/)).toBeVisible();
     await next(page).click();
     await page.getByRole('button', { name: 'Start monitoring' }).click();
@@ -143,7 +147,7 @@ test.describe('data sources: capability matrix and the 12-step wizard', () => {
     // ---- the active connection: honest health facts
     await expect(card.getByText('active', { exact: true })).toBeVisible();
     await state(card, 'healthy');
-    await expect(card.getByText('n/a — nothing is collected yet')).toBeVisible();
+    await expect(card.getByText('n/a — nothing has been collected')).toBeVisible();
     await expect(card.getByText(/no data is being collected/)).toBeVisible();
     await expect(card.locator('dt', { hasText: 'Credentials' }).locator('..')).toContainText('token (stored, write-only)');
 
