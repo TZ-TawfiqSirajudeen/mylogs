@@ -89,7 +89,7 @@ everything is audited.
 |---|---|---|
 | `AUTH_MODE=oidc` | yes | |
 | `WEB_ORIGIN` | yes | Public origin users type, e.g. `https://nexus.example.com` (https in production). Also the CSRF `Origin` allow-list. |
-| `OIDC_ISSUER` | yes | Issuer URL; discovery is read from `<issuer>/.well-known/openid-configuration`. https in production. |
+| `OIDC_ISSUER` | yes | Issuer URL; discovery is read from `<issuer>/.well-known/openid-configuration`. https in production. Copy it from the provider's discovery document **exactly**: a path is used as written, trailing slash included (Azure AD B2C, Authentik and Entra v1.0 publish `https://host/tenant/v2.0/`); for a bare host the slash does not matter. It is also the issuer half of every user's `(issuer, sub)` identity, so changing it later makes existing users look like new people. |
 | `OIDC_CLIENT_ID` | yes | |
 | `OIDC_CLIENT_SECRET` **or** `OIDC_CLIENT_SECRET_FILE` | recommended | Confidential client. Prefer the file form (mounted secret). Never baked into images, logged, or returned by any endpoint. Omit only for a public client with PKCE (not recommended). |
 | `OIDC_REDIRECT_URI` | no | Default `<WEB_ORIGIN>/api/v1/auth/oidc/callback`. Must be on `WEB_ORIGIN`. |
@@ -156,25 +156,117 @@ OIDC_PROVIDER_NAME=Microsoft
 OIDC_REQUIRE_EMAIL_VERIFIED=false
 ```
 
-   **Security notes for Entra.** Use the **tenant-specific** issuer (never `common`/`organizations`, whose issuer varies per tenant).
+   **Security notes for Entra.** Use the **tenant-specific** issuer (never `common`/`organizations`: their discovery document serves
+   the literal template `https://login.microsoftonline.com/{tenantid}/v2.0`, which does not match, and Nexus refuses it).
    With `REQUIRE_EMAIL_VERIFIED=false`, e-mail is trusted for the *first* binding only, so make sure only your tenant can sign in
    (single-tenant registration; *Enterprise applications → Properties → Assignment required = Yes* limits it to assigned users).
    Entra's `email` claim is mutable by tenant admins, which is exactly why Nexus binds `(issuer, sub)` after the first sign-in
    and never trusts the e-mail again.
 
+   * **Without the optional `email` claim an Entra user cannot sign in at all.** `preferred_username` and `upn` are used only as a
+     display-name fallback and are **never** treated as an e-mail address (they are mutable and not guaranteed to be a mailbox).
+   * Entra's `sub` is pairwise per application registration; Nexus keys identities on it exactly as sent. Re-registering the
+     application (new client id) therefore produces new `sub` values and looks like new people to Nexus.
+   * Keep `OIDC_PROVISIONING=invite-only` with `REQUIRE_EMAIL_VERIFIED=false`. Combining `jit` with `false` lets anybody whose
+     directory entry carries an address in an allowed domain create an account, including any account whose address you do not
+     control; Nexus accepts the combination (the domain list is mandatory) but it is only as safe as your tenant's address hygiene.
+   * When a user belongs to too many groups Entra omits the `groups` claim and sends `_claim_names`/`_claim_sources` instead. Nexus
+     never follows those pointers; such a user is provisioned as a plain member (or is simply signed in, if already known). Map
+     groups by their **object id (GUID)**, not by name, in `OIDC_GROUP_ROLE_MAP`.
+   * The ID token is validated against the issuer from the discovery document, so a v1.0-style token (`https://sts.windows.net/<tid>/`)
+     is refused by an app configured with the `/v2.0` issuer. Use the v2.0 issuer shown above; this was verified only by
+     simulation (a token whose `iss` is the v1.0 URL), not against a live tenant.
+
 ### Any other OpenID Connect provider (Okta, Auth0, Keycloak, Google Workspace, …)
 
 Create a **Web / confidential** application with the redirect URI above; set `OIDC_ISSUER` to the issuer URL shown in the
 provider's discovery document (it must equal the `issuer` value in `/.well-known/openid-configuration` exactly — Nexus rejects a
-mismatch); set `OIDC_PROVIDER_NAME`. Leave `OIDC_REQUIRE_EMAIL_VERIFIED=true` for providers that send `email_verified`.
+mismatch); set `OIDC_PROVIDER_NAME`. Leave `OIDC_REQUIRE_EMAIL_VERIFIED=true` for providers that send `email_verified`
+(a boolean, or the strings `"true"`/`"false"`; any other value counts as not verified).
 
-### What could not be verified here
+Interoperability details Nexus handles: the client secret is sent with HTTP Basic by default, and in the request body when the
+provider's discovery document advertises `client_secret_post` and not `client_secret_basic`. Providers that only support
+`private_key_jwt` / `client_secret_jwt` are **not** supported. The RFC 9207 `iss` response parameter is required only when the
+provider advertises `authorization_response_iss_parameter_supported`. A provider with no `end_session_endpoint` (several have none)
+still signs people out of Nexus; their provider session simply stays. Every HTTP call to the provider is capped at 10 seconds.
 
-Everything above is exercised against the **mock provider only** (tests/e2e/specs/11-oidc.spec.ts, apps/api/test/oidc.test.ts).
-No sign-in has been performed against Entra ID or any real provider, because that needs a tenant, an app registration and a
-client secret that this repository's development environment does not have. Provider-specific details (Entra optional claims,
-end-session behaviour, group claims, token lifetimes) are therefore **unverified against the live service** and should be
-checked in a staging tenant before go-live.
+## Verification status
+
+**No sign-in has ever been performed against Microsoft Entra ID or any other real identity provider.** That needs a tenant, an app
+registration and a client secret that this repository's development environment does not have. What *has* been verified is the
+relying party's behaviour against the in-repo mock provider (`packages/mock-idp`), including configurations that imitate what real
+providers send. Treat every item under "Not verified" as a go-live check, not as a known-good.
+
+### Verified (mock provider, automated)
+
+| Area | Evidence |
+|---|---|
+| Authorization code + PKCE S256, state, nonce, RFC 9207 `iss`, one-time flow records, session fixation, logout, CSRF, RBAC and tenant isolation under SSO sessions | `apps/api/test/oidc.test.ts` (80 tests), `tests/e2e/specs/11-oidc.spec.ts` (12 browser specs) |
+| Invalid ID tokens never create a session: bad signature, wrong nonce / audience / issuer, expired, not yet valid, missing `sub`, missing nonce, `alg=none`, wrong `azp`, no ID token | `oidc.test.ts` (tamper table) |
+| **Key confusion:** an HS256 token signed with the client secret, and a token whose `alg` the published key does not allow, are refused | `oidc-provider-quirks.test.ts` |
+| **Clock skew:** `exp`/`nbf` 20 s off are accepted and 45 s off are refused at the default 30 s tolerance; tolerance 0 is strict. (An `iat` in the future was **not** tested; from reading the libraries it is only type-checked.) | `oidc-provider-quirks.test.ts` |
+| **JWKS:** an endpoint error or a hang (cut off at about 5 s) fails the sign-in cleanly and the next attempt works; after a key rotation an unknown `kid` causes at most **one** refetch per 30 s cool-down (repeated failures do not hit the provider), then sign-in recovers | `oidc-provider-quirks.test.ts` |
+| **Slow providers:** discovery that hangs is cut off at about 10 s with a clean "provider not reachable" redirect and is retried next time (a failed discovery is never cached); a token endpoint that hangs is cut off at 10 s | `oidc-provider-quirks.test.ts` |
+| **Entra v2.0 shape** (issuer `…/<tenant-id>/v2.0`, `tid`/`oid`/`ver` claims, no `email_verified`): refused by default, accepted with `OIDC_REQUIRE_EMAIL_VERIFIED=false`, bound to `(issuer, sub)`; **no `email` claim means no sign-in even when `preferred_username`/`upn` equal another user's address** (no binding, no session); v1.0-style `iss` refused; extra token-response fields (`ext_expires_in`, `foci`, `client_info`), a string `expires_in` and a lowercase `token_type` are tolerated; the multi-tenant `/common` template issuer `{tenantid}` is refused | `oidc-provider-quirks.test.ts` |
+| **Issuer shapes:** bare host, bare host with trailing slash, path, and path with trailing slash all sign in, and the stored identity issuer is the provider's own string | `oidc-provider-quirks.test.ts` (and the unit test for configuration normalisation) |
+| Discovery issuer different from the configured one is refused and does not leave a half-started flow | `oidc-provider-quirks.test.ts` |
+| Multi-audience tokens (`aud` array with `azp` = this client) accepted; `azp` for another client refused; providers that do not implement RFC 9207 work; one that advertises it and omits it is refused | `oidc-provider-quirks.test.ts` |
+| Provider error responses (`login_required`, `interaction_required`, `consent_required`, `temporarily_unavailable`, `server_error`, `invalid_scope`, a 5,000-character error code) all become one generic message; an unregistered redirect URI never sends the browser back | `oidc-provider-quirks.test.ts` |
+| Client authentication: `client_secret_basic` and, when only that is advertised, `client_secret_post` | `oidc-provider-quirks.test.ts` |
+| Hostile claim values: markup and control characters in `name` are removed and the name is capped at 100 characters; an over-long e-mail, an over-long `sub`, an e-mail with whitespace and a look-alike (Cyrillic) domain are refused; e-mail letter case still binds to the pre-created account; `email_verified` as the strings `"true"`/`"false"` is honoured; groups overage (`_claim_names`) yields a plain member; GUID groups map only when listed; a groups claim sent as a single string grants nothing | `oidc-provider-quirks.test.ts` |
+| A user disabled after being bound cannot sign in and their live session stops working; logout works (session revoked, no redirect) when the provider has no `end_session_endpoint` | `oidc-provider-quirks.test.ts` |
+| Configuration refusals: `http://` issuers (outside the dev flag), production with dev settings, redirect URI off the web origin, invalid role maps | `apps/api/src/config.test.ts` |
+
+### Found and fixed by simulating real providers
+
+1. **An issuer with a path and a trailing slash made discovery fail.** Configuration stripped the trailing slash, but the library
+   compares the provider's `issuer` as a URL, in which a trailing slash after a path is significant, so a provider that publishes
+   `https://host/tenant/v2.0/` (Azure AD B2C, Authentik and Entra v1.0 are documented to do so; not tested against them) could never sign anyone in. A path is now kept exactly as configured (`apps/api/src/auth/oidc-config.ts`).
+2. **A hanging token endpoint was held open for the library default of 30 s** (and a 16 s stall still *succeeded*). Every call to the
+   provider is now capped at 10 s (`IDP_HTTP_TIMEOUT_SECONDS` in `apps/api/src/auth/oidc.ts`).
+3. **A provider that advertises only `client_secret_post` could not be used.** Nexus always sent HTTP Basic. It now follows the
+   provider's advertised method (basic when basic is offered, post when only post is).
+
+Each has a regression test in `apps/api/test/oidc-provider-quirks.test.ts` (they failed before the fix).
+
+### Not verified (needs a real tenant; do these in staging)
+
+* A real sign-in against Entra ID, and against any other provider you intend to use. Follow
+  [docs/runbooks/oidc-staging-verification.md](runbooks/oidc-staging-verification.md).
+* That the provider's real discovery document, JWKS and token endpoint behave as the mock does: TLS to the provider, real key rotation
+  timing (the JWKS cache lifetime is the library default; not exercised here), real token lifetimes and clock difference.
+* Which claims your tenant actually puts in the ID token (`email`, `preferred_username`, `groups`, `tid`) under your optional-claims
+  and group-claims configuration.
+* Entra's behaviour for `post_logout_redirect_uri`, guest and multi-tenant users, Conditional Access / MFA interrupting the flow,
+  consent prompts, and group overage in a large directory.
+* Provider-specific refresh, back-channel logout and session-lifetime behaviour (Nexus uses none of them; a user disabled at the
+  provider keeps their Nexus session until it expires or an admin revokes it).
+* Behind a real reverse proxy: `WEB_ORIGIN`, `Secure` / `__Host-` cookies in a browser over HTTPS, and `trustProxy` (the browser specs run over plain `http://localhost`).
+
+### Staging sign-in checklist (summary)
+
+Full steps, expected results and what to capture are in [docs/runbooks/oidc-staging-verification.md](runbooks/oidc-staging-verification.md).
+Tick each before enabling SSO for anyone beyond the pilot group:
+
+- [ ] App registered with the exact redirect URI, optional `email` claim added, secret stored in the secret store with its expiry date noted
+- [ ] `OIDC_ISSUER` copied from the provider's discovery document; `curl <issuer>/.well-known/openid-configuration` returns that same `issuer`
+- [ ] API starts (misconfiguration stops it with a message naming the variable)
+- [ ] An invited user signs in; `auth.login` appears in the audit trail with `identityBound: true` on the first sign-in only
+- [ ] A user who was **not** invited is refused with the generic "not authorized" page and no account appears
+- [ ] A user whose ID token has no `email` is refused; nothing is bound
+- [ ] A second sign-in after changing the user's e-mail at the provider still lands on the same Nexus user
+- [ ] Sign out ends the Nexus session; the provider's own session behaves as documented for that provider
+- [ ] A user removed from the organization (and disabled at the provider) cannot sign in and their open tab gets 401 on the next request
+- [ ] Provider outage drill: block the provider's host; new sign-ins show "not reachable", existing sessions keep working; unblock and retry works without a restart
+- [ ] Rollback rehearsed (see the runbook): the previous mode can be restored and nobody is locked out
+
+### Rollback
+
+SSO changes no data you cannot undo: identities are bound by adding `externalIssuer` / `externalSubject` to the user record.
+To roll back, set `AUTH_MODE` back to the previous mode **only outside production** (production refuses `dev`), or keep the old
+`OIDC_*` values and redeploy the previous release; to unbind one person, clear their `externalIssuer`/`externalSubject` in the
+`users` collection under change control. A user locked out by a wrong issuer or tenant is recovered by correcting `OIDC_ISSUER`
+(see the identity-key warning in the configuration table) or by adding a membership directly in MongoDB (see Operations).
 
 ## Operations
 

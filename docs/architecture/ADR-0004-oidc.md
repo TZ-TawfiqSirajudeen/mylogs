@@ -20,8 +20,10 @@ Status: accepted. Implementation notes and operator guide: [docs/auth-oidc.md](.
 * Session JWTs in the browser (not revocable).
 
 ## Consequences / residual risk
-* Verified against a mock provider and in a real browser; **not** against Entra ID or another live provider (needs credentials). Provider-specific behaviour
-  (optional claims, end-session, group claims) must be checked in staging.
+* Verified against a mock provider and in a real browser, including simulated real-provider behaviour (Entra v2.0 token shape, issuer paths and trailing slashes,
+  key rotation, slow or failing endpoints, `client_secret_post`-only providers, hostile claims; see `docs/auth-oidc.md` "Verification status"); **not** against Entra ID
+  or another live provider (needs credentials). Provider-specific behaviour (optional claims, end-session, group claims) must be checked in staging with
+  `docs/runbooks/oidc-staging-verification.md`.
 * No MFA in Nexus itself: enforce it at the identity provider.
 * Session lifetime is fixed server-side (idle + absolute); there is no back-channel logout, so a user disabled at the IdP keeps their Nexus session until it
   expires or an admin revokes it (Settings → Members → *Sign out everywhere*).
