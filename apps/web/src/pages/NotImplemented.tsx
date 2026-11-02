@@ -3,7 +3,7 @@ import { Badge, EmptyState } from '../ui';
 
 const PLAN: Record<string, [string, number]> = {
   '/services': ['Services', 4], '/traces': ['Traces', 4], '/metrics': ['Metrics', 4],
-  '/dependencies': ['Dependency map', 7], '/incidents': ['Incidents', 6], '/alerts': ['Alerts', 6],
+  '/dependencies': ['Dependency map', 7],
   '/deployments': ['Deployments', 6], '/dashboards': ['Dashboards', 7], '/settings': ['Settings', 2],
 };
 
