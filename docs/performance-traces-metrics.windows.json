@@ -1,0 +1,322 @@
+{
+  "machine": {
+    "cpus": 8,
+    "cpuModel": "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz",
+    "memGiB": 16,
+    "node": "v22.17.0"
+  },
+  "method": "base data through the real pipelines; longer windows by cloning stored documents backwards in time (see the header of bench/bench-windows.ts)",
+  "interactiveThresholdMs": 2000,
+  "traceDataset": {
+    "baseSpans": 391200,
+    "spans24h": 1564800,
+    "baseTraces": 20000,
+    "density": "65200 spans per hour",
+    "storageMiB": 261.7,
+    "indexMiB": 411,
+    "note": "cloned spans have no trace summaries; 7 d windows contain the same 24 h of data (7 d at this density = about 11 million spans, not built)"
+  },
+  "traceQueries": [
+    {
+      "name": "per-service SERVER span statistics",
+      "window": "6 h",
+      "docsInWindow": 60000,
+      "guard": "n/a",
+      "p50": 1100.5,
+      "p95": 1234.2,
+      "max": 1234.2,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "observed dependencies",
+      "window": "6 h",
+      "docsInWindow": 60000,
+      "guard": "n/a",
+      "p50": 1255.1,
+      "p95": 1351.4,
+      "max": 1351.4,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "server span timeline (6-minute windows)",
+      "window": "6 h",
+      "docsInWindow": 60000,
+      "guard": "n/a",
+      "p50": 478.3,
+      "p95": 535.2,
+      "max": 535.2,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "per-service SERVER span statistics",
+      "window": "24 h",
+      "docsInWindow": 240000,
+      "guard": "n/a",
+      "p50": 2900.4,
+      "p95": 3066.1,
+      "max": 3066.1,
+      "runs": 3,
+      "interactive": false
+    },
+    {
+      "name": "observed dependencies",
+      "window": "24 h",
+      "docsInWindow": 240000,
+      "guard": "n/a",
+      "p50": 1164.1,
+      "p95": 1300.4,
+      "max": 1300.4,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "server span timeline (24-minute windows)",
+      "window": "24 h",
+      "docsInWindow": 240000,
+      "guard": "n/a",
+      "p50": 1913,
+      "p95": 2059,
+      "max": 2059,
+      "runs": 3,
+      "interactive": false
+    },
+    {
+      "name": "per-service SERVER span statistics",
+      "window": "7 d",
+      "docsInWindow": 240000,
+      "guard": "n/a",
+      "p50": 2662.4,
+      "p95": 2734.9,
+      "max": 2734.9,
+      "runs": 3,
+      "interactive": false
+    },
+    {
+      "name": "observed dependencies",
+      "window": "7 d",
+      "docsInWindow": 240000,
+      "guard": "n/a",
+      "p50": 1135,
+      "p95": 1190.3,
+      "max": 1190.3,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "server span timeline (168-minute windows)",
+      "window": "7 d",
+      "docsInWindow": 240000,
+      "guard": "n/a",
+      "p50": 1977.4,
+      "p95": 2205.3,
+      "max": 2205.3,
+      "runs": 3,
+      "interactive": false
+    }
+  ],
+  "metricDataset": {
+    "series": 600,
+    "base": "1 h through the pipeline",
+    "allSeries24h": 864000,
+    "oneService7d": 604800,
+    "totalMinuteDocuments": 1382400,
+    "dataMiB": 611.8,
+    "storageMiB": 75.6,
+    "indexMiB": 184.3,
+    "note": "600 series for 7 d (about 6.0 million documents) was not built"
+  },
+  "metricQueries": [
+    {
+      "name": "request rate by service (all 600 series)",
+      "window": "3 h",
+      "docsInWindow": 108000,
+      "guard": "allowed",
+      "p50": 303.7,
+      "p95": 366.1,
+      "max": 366.1,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "p99 across everything (all 600 series)",
+      "window": "3 h",
+      "docsInWindow": 108000,
+      "guard": "allowed",
+      "p50": 542.5,
+      "p95": 545.1,
+      "max": 545.1,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "HTTP service overview (all 600 series)",
+      "window": "3 h",
+      "docsInWindow": 108000,
+      "guard": "allowed",
+      "p50": 1082.8,
+      "p95": 1082.8,
+      "max": 1082.8,
+      "runs": 2,
+      "interactive": true
+    },
+    {
+      "name": "request rate by service (all 600 series)",
+      "window": "6 h",
+      "docsInWindow": 216000,
+      "guard": "allowed",
+      "p50": 471,
+      "p95": 541.6,
+      "max": 541.6,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "p99 across everything (all 600 series)",
+      "window": "6 h",
+      "docsInWindow": 216000,
+      "guard": "allowed",
+      "p50": 1126.5,
+      "p95": 1197.7,
+      "max": 1197.7,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "HTTP service overview (all 600 series)",
+      "window": "6 h",
+      "docsInWindow": 216000,
+      "guard": "allowed",
+      "p50": 2110.2,
+      "p95": 2110.2,
+      "max": 2110.2,
+      "runs": 2,
+      "interactive": false
+    },
+    {
+      "name": "request rate by service (all 600 series)",
+      "window": "24 h",
+      "docsInWindow": 864000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 1582.2,
+      "p95": 2081.6,
+      "max": 2081.6,
+      "runs": 3,
+      "interactive": false
+    },
+    {
+      "name": "p99 across everything (all 600 series)",
+      "window": "24 h",
+      "docsInWindow": 864000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 3849.8,
+      "p95": 3882.2,
+      "max": 3882.2,
+      "runs": 3,
+      "interactive": false
+    },
+    {
+      "name": "HTTP service overview (all 600 series)",
+      "window": "24 h",
+      "docsInWindow": 864000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 7637.9,
+      "p95": 7637.9,
+      "max": 7637.9,
+      "runs": 2,
+      "interactive": false
+    },
+    {
+      "name": "p95 by route, one service (60 series)",
+      "window": "3 h",
+      "docsInWindow": 10800,
+      "guard": "allowed",
+      "p50": 101.7,
+      "p95": 107.5,
+      "max": 107.5,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "request rate, one service (60 series)",
+      "window": "3 h",
+      "docsInWindow": 10800,
+      "guard": "allowed",
+      "p50": 50.7,
+      "p95": 51.4,
+      "max": 51.4,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "p95 by route, one service (60 series)",
+      "window": "24 h",
+      "docsInWindow": 86400,
+      "guard": "allowed",
+      "p50": 550.1,
+      "p95": 576.2,
+      "max": 576.2,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "request rate, one service (60 series)",
+      "window": "24 h",
+      "docsInWindow": 86400,
+      "guard": "allowed",
+      "p50": 216.1,
+      "p95": 273.4,
+      "max": 273.4,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "p95 by route, one service (60 series)",
+      "window": "7 d",
+      "docsInWindow": 604800,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 3833.8,
+      "p95": 4504.5,
+      "max": 4504.5,
+      "runs": 3,
+      "interactive": false
+    },
+    {
+      "name": "request rate, one service (60 series)",
+      "window": "7 d",
+      "docsInWindow": 604800,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 1222.8,
+      "p95": 1310.7,
+      "max": 1310.7,
+      "runs": 3,
+      "interactive": true
+    },
+    {
+      "name": "metric catalogue (names)",
+      "window": "any",
+      "guard": "n/a",
+      "p50": 8.8,
+      "p95": 10.6,
+      "max": 10.6,
+      "runs": 5
+    },
+    {
+      "name": "label values (labels)",
+      "window": "any",
+      "guard": "n/a",
+      "p50": 41.6,
+      "p95": 48.5,
+      "max": 48.5,
+      "runs": 5
+    }
+  ],
+  "measuredAt": "2026-10-31T09:02:37.370Z"
+}

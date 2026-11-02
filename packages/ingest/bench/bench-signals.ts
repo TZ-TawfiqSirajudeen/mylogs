@@ -19,7 +19,7 @@ import { resolve } from 'node:path';
 import { MetricQuery, TraceQuery } from '@nexus/contracts';
 import { AuditService, type Database } from '@nexus/database';
 import { freshTestDatabase, startTestMongo } from '@nexus/database/testing';
-import { MongoMetricStore } from '@nexus/metricstore';
+import { MetricRollupCompactor, MongoMetricStore } from '@nexus/metricstore';
 import { MongoTraceStore, type TraceStore } from '@nexus/tracestore';
 import { DEFAULT_INGEST_CONFIG, IngestTokenService, MetricPipeline, TokenCreate, TracePipeline } from '../src/index.js';
 
@@ -216,6 +216,16 @@ async function main() {
     }
   }));
   const mSec = (performance.now() - m0) / 1000;
+  // Round 3 (ADR-0007): the worker's compactor normally does this every 30 s; here it runs once after the load, with the production lag (2 minutes).
+  // BENCH_NO_ROLLUPS=1 skips it (queries then read minute documents, as in Rounds 1 and 2).
+  // "before" = the Round 2 code path: minute documents only and the one-point-per-minute overview timeline
+  const rawStore = new MongoMetricStore(db, { rollups: false, overviewStep: (f, t) => Math.max(60_000, Math.ceil((t.getTime() - f.getTime()) / 400 / 60_000) * 60_000) });
+  let rollupCompaction: Record<string, unknown> | null = null;
+  if (process.env.BENCH_NO_ROLLUPS !== '1') {
+    const c0 = performance.now();
+    const cr = await new MetricRollupCompactor(db, { batch: 50 }).runOnce(new Date(), 600_000);
+    rollupCompaction = { seconds: ms((performance.now() - c0) / 1000), ...cr, rollupDocuments: await db.c.metricRollups.countDocuments({}), minuteDocuments: await db.c.metricPoints.countDocuments({}) };
+  }
   const mq = (over: object) => MetricQuery.parse({ from: new Date(mStart).toISOString(), to: new Date(now).toISOString(), metric: 'http.server.request.duration', ...over });
   const metricQueries = [
     await time('metric catalogue (names)', () => metricStore.names(scope), 10),
@@ -223,7 +233,10 @@ async function main() {
     await time('p95 by route, one service (3 h)', () => metricStore.query(scope, mq({ agg: 'p95', service: 'svc-1', groupBy: ['http.route'] })), 8),
     await time('request rate, all services, by service (3 h)', () => metricStore.query(scope, mq({ agg: 'rate', groupBy: ['service'] })), 5),
     await time('p99 across everything (3 h)', () => metricStore.query(scope, mq({ agg: 'p99' })), 5),
-    await time('HTTP service overview (3 h)', () => metricStore.httpOverview(scope, new Date(mStart), new Date(now)), 5),
+    await time('HTTP service overview (3 h)', () => metricStore.httpOverview(scope, new Date(mStart), new Date(now)), 15),
+    // same data, same process, minute documents only (the Round 2 code path): the in-run "before"
+    await time('HTTP service overview (3 h), minute documents only', () => rawStore.httpOverview(scope, new Date(mStart), new Date(now)), 7),
+    await time('request rate, all services, by service (3 h), minute documents only', () => rawStore.query(scope, mq({ agg: 'rate', groupBy: ['service'] })), 5),
     await time('diagnostics', () => metricStore.diagnostics(scope), 5),
   ];
   const guarded = await metricStore.query(scope, mq({ agg: 'count', groupBy: ['http.route', 'http.response.status_code'] }));
@@ -242,7 +255,7 @@ async function main() {
     backpressure, recovery,
     metricDataset: { series: seriesCount, hours: METRIC_HOURS, intervalSeconds: tick / 1000, dataPoints: mAccepted, instancesPerService: instances },
     metricIngestion: { pointsPerSecond: Math.round(mAccepted / mSec), seconds: ms(mSec), requests: ticks * CONCURRENCY, pointsPerRequest: Math.round(seriesCount / CONCURRENCY), concurrency: CONCURRENCY, model: 'each writer = one exporter fleet owning distinct services, ticks in order', requestLatencyMs: { p50: ms(pct(mLat, 50)), p95: ms(pct(mLat, 95)), max: ms(Math.max(...mLat)) } },
-    metricQueries, metricGroupedQueryResultSeries: guarded.series.length,
+    rollupCompaction, metricQueries, metricGroupedQueryResultSeries: guarded.series.length,
     storage: {
       spans: { docs: spanCount, dataMiB: mib(sSpans?.size), storageMiB: mib(sSpans?.storageSize), indexMiB: mib(sSpans?.totalIndexSize), bytesPerSpanOnDisk: sSpans ? Math.round(sSpans.storageSize / spanCount) : null },
       traceSummaries: { docs: traceCount, storageMiB: mib(sSum?.storageSize), indexMiB: mib(sSum?.totalIndexSize) },
@@ -253,7 +266,7 @@ async function main() {
     caveats: ['single mongod, in-memory-server defaults, same machine as the load generator', 'in-process pipelines: HTTP/TLS excluded', 'summary recompute runs inside every trace write (included in ingestion figures)'],
   };
   console.log(JSON.stringify(report, null, 2));
-  const out = resolve(process.cwd(), '../../docs/performance-traces-metrics.json');
+  const out = resolve(process.cwd(), process.env.BENCH_TAG ? `../../docs/performance-traces-metrics.round3-signals-${process.env.BENCH_TAG}.json` : '../../docs/performance-traces-metrics.json');
   mkdirSync(resolve(out, '..'), { recursive: true });
   writeFileSync(out, JSON.stringify({ ...report, measuredAt: new Date().toISOString() }, null, 2));
   await db.close();

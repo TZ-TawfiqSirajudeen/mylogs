@@ -34,11 +34,32 @@ root (earliest parentless span) and HTTP facts, and the completeness facts `hasR
   the cumulative state used to convert counters to increases, the watermark and the recent-timestamp set used for idempotency, and `expireAt`.
 * **Points** (`_id = seriesId:minute`): `count`, `sum`, `min`, `max`, `last/lastAt` (gauges), `buckets` (histograms), up to 5 `exemplars`. Gauges keep last/min/max/sum/count; sums keep the
   **increase** per minute; histograms keep merged bucket counts.
+* **Rollups** (`metric_rollups`, since migration v30; [ADR-0007](architecture/ADR-0007-metric-rollups.md)): disposable coarser copies of the points, one document per series per **5-minute** or **1-hour**
+  bucket (`_id = seriesId:tier:bucketStart`, same fields as a point plus `tier` and `lastMinute`; histogram bucket counts are summed exactly, so percentiles are computed from the merged distribution).
+  They are never the source of truth and can be rebuilt from the points at any time.
+
+### Rollup semantics and limits (what a reader of a chart can rely on)
+* **Same answer, fewer documents.** A query answered from rollups returns what the minute documents would return (values within floating-point rounding; percentiles identical), for sums and rates, gauges
+  (min, max, avg, count, sum, newest value by timestamp) and explicit-bucket histograms. `rollup.test.ts` proves it against the minute documents with randomized data (resets, gaps, late and
+  out-of-order points, two bucket layouts under one name, windows that do not line up with bucket boundaries, writers racing the compactor).
+* **Which tier.** Query windows are `step` long and aligned to multiples of it, so a tier is used only if it divides the step: 5-minute buckets for steps that are multiples of 5 minutes, 1-hour buckets for
+  multiples of 1 hour. The unaligned edges of the window, the newest few minutes (a bucket is rolled up about 2 minutes after it ended) and anything the compactor has not covered yet are read from the minute documents.
+  An automatic step is rounded **up** to 5 minutes (from 3 min) and to 1 hour (from 25 min): 24 h windows have 5-minute points, 7 d windows 1-hour points (168). A step you ask for is kept.
+  The HTTP overview timeline has about 48 points for windows longer than 90 minutes (3 h: 5-minute points).
+* **Late data** (a point for an older minute) marks its series; until the compactor has recomputed the affected buckets the query reads the minute documents for that range. Usually within one compaction interval (30 s).
+  There is no way to see stale rollups: coverage per series is `min(published watermark, earliest pending marker)`.
+* **If the compactor is down** nothing is wrong, only slower: coverage stops advancing and queries read minute documents (and the scan guard applies to what is read).
+* **Retention.** A bucket lives as long as the latest of its minutes, so at the edge of the retention window it can hold up to one bucket-length (5 min or 1 h) of data the minute documents have already expired. It never lacks data the minute documents have.
+* **Exemplars** of a window read from rollups come from the newest minute in each bucket, so they can differ from the minute-document answer (which picked an arbitrary series in the newest minute); both are real exemplars.
+* **Limits that stay.** Series per query (2,000), result series (50), points per series (400), the scan guard (250,000 documents *read*; rollup buckets count) and the 8 s timeout. Percentiles stay estimates at histogram bucket resolution.
+  Cost is still linear in series x buckets: 600 series for 7 d is about 100,000 hourly buckets; 20,000 series would be about 3.4 million (not measured, extrapolated).
+* **Operations.** `METRIC_ROLLUP_INTERVAL_MS` (worker, default 30,000; 0 disables compaction). Backfill of series that predate rollups is automatic (worker start, then every 30 min). An operator can force
+  `MetricRollupCompactor.requestRebuild({ orgId, ... })` (queries read minute documents until it is done).
 
 ### Services (`services`)
 One row per service per environment, written on ingest from valid `service.name`: version, first seen, and the **event time** (not receive time) of the newest span / metric point / log.
 
-## 2. Indexes (all created by migration v6, with the rollback in `down()`)
+## 2. Indexes (created by migration v6, with the rollback in `down()`; the rollup indexes by migration v30)
 | Collection | Index | Serves |
 |---|---|---|
 | `spans` | `(scope, traceId, start)` | loading a trace (the waterfall) and summary recompute |
@@ -48,6 +69,8 @@ One row per service per environment, written on ingest from valid `service.name`
 | `trace_summaries` | `(scope, traceId)` · `(scope, start↓, _id↓)` · `(scope, durationNs↓, _id↓)` · `(scope, services, start↓)` | trace-id lookup; newest-first and slowest-first search with keyset pagination **in index order** (no blocking sort) |
 | `metric_series` | `(scope, name, service)` | catalogue, label discovery, series selection |
 | `metric_points` | `(scope, metric, service, minute)` · `(seriesId, minute)` | range reads by series (the query path) |
+| `metric_rollups` (migration v30) | `(seriesId, tier, minute)` · `expireAt` TTL | range reads of one tier by series; retention |
+| `metric_series` (migration v30) | `rollFrom` (partial: only series with unprocessed minutes) | the compactor's work list |
 | `services` | `(scope, name)` | inventory |
 
 `scope` = `(orgId, projectId, environmentId)`. Every query starts with the caller's scope; an `environmentIds` filter can only narrow it.
@@ -81,4 +104,4 @@ Metric query protections: time range ≤ 31 days, ≤ 400 points per series (the
 * Cardinality limits are settings of the ingestion service: `METRIC_MAX_SERIES_PER_METRIC` (default 2,000) and `METRIC_MAX_SERIES_PER_ENVIRONMENT` (default 20,000).
 * The span and metric storage cost is measured in [performance-traces-metrics.md](performance-traces-metrics.md) (about 180 bytes of data and about 290 bytes of index per span on this hardware); aggregate queries scan a time range and grow with the window and the number of series.
 * Deleting a project's telemetry on demand is **not** implemented (retention only).
-* Migration v6 creates collections and indexes only; it does not touch existing data.
+* Migration v6 creates collections and indexes only; it does not touch existing data. Migration v30 adds the rollup collection and indexes (one collection and three indexes in total: 24 collections); existing series are backfilled by the worker, not by the migration.

@@ -1,0 +1,572 @@
+{
+  "machine": {
+    "cpus": 8,
+    "cpuModel": "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz",
+    "memGiB": 16,
+    "node": "v22.17.0"
+  },
+  "method": "base data through the real pipelines; longer windows by cloning stored documents backwards in time (see the header of bench/bench-windows.ts)",
+  "interactiveThresholdMs": 2000,
+  "metricDataset": {
+    "series": 600,
+    "base": "1 h through the pipeline",
+    "allSeries24h": 864000,
+    "oneService7d": 604800,
+    "allSeries7d": true,
+    "totalMinuteDocuments": 6048000,
+    "dataMiB": 2678.8,
+    "storageMiB": 379.7,
+    "indexMiB": 763,
+    "note": "all 600 series for 7 d (6.05 million minute documents)"
+  },
+  "rollupBuild": {
+    "seconds": 369.1,
+    "minuteDocumentsRead": 6048000,
+    "minuteDocumentsPerSecond": 16387,
+    "series": 600,
+    "buckets5m": 1209600,
+    "buckets1h": 100800,
+    "rounds": 84,
+    "rollupDocuments": 1310400,
+    "rollupDataMiB": 611.5,
+    "rollupStorageMiB": 83.9,
+    "rollupIndexMiB": 140.3,
+    "pendingAfter": 0
+  },
+  "metricQueries": [
+    {
+      "name": "request rate by service (all 600 series)",
+      "window": "3 h",
+      "docsInWindow": 108000,
+      "guard": "allowed",
+      "p50": 220.7,
+      "p95": 272.9,
+      "min": 176.1,
+      "max": 272.9,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 220.7,
+        "p95": 272.9,
+        "min": 176.1,
+        "max": 272.9,
+        "runs": 9
+      },
+      "after": {
+        "p50": 189.1,
+        "p95": 231.4,
+        "min": 166.3,
+        "max": 231.4,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "p99 across everything (all 600 series)",
+      "window": "3 h",
+      "docsInWindow": 108000,
+      "guard": "allowed",
+      "p50": 361.2,
+      "p95": 516,
+      "min": 331.4,
+      "max": 516,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 361.2,
+        "p95": 516,
+        "min": 331.4,
+        "max": 516,
+        "runs": 9
+      },
+      "after": {
+        "p50": 363.8,
+        "p95": 420.8,
+        "min": 322.5,
+        "max": 420.8,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "HTTP service overview (all 600 series)",
+      "window": "3 h",
+      "docsInWindow": 108000,
+      "guard": "allowed",
+      "p50": 665.9,
+      "p95": 865.5,
+      "min": 628.1,
+      "max": 865.5,
+      "runs": 15,
+      "interactive": true,
+      "before": {
+        "p50": 665.9,
+        "p95": 865.5,
+        "min": 628.1,
+        "max": 865.5,
+        "runs": 15
+      },
+      "after": {
+        "p50": 216.5,
+        "p95": 227.3,
+        "min": 206.2,
+        "max": 227.3,
+        "runs": 15
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "request rate by service (all 600 series)",
+      "window": "6 h",
+      "docsInWindow": 216000,
+      "guard": "allowed",
+      "p50": 290,
+      "p95": 328.8,
+      "min": 268.7,
+      "max": 328.8,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 290,
+        "p95": 328.8,
+        "min": 268.7,
+        "max": 328.8,
+        "runs": 9
+      },
+      "after": {
+        "p50": 284.6,
+        "p95": 318.9,
+        "min": 266.2,
+        "max": 318.9,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "p99 across everything (all 600 series)",
+      "window": "6 h",
+      "docsInWindow": 216000,
+      "guard": "allowed",
+      "p50": 724.8,
+      "p95": 1203.3,
+      "min": 650.7,
+      "max": 1203.3,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 724.8,
+        "p95": 1203.3,
+        "min": 650.7,
+        "max": 1203.3,
+        "runs": 9
+      },
+      "after": {
+        "p50": 684.3,
+        "p95": 824.4,
+        "min": 646,
+        "max": 824.4,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "HTTP service overview (all 600 series)",
+      "window": "6 h",
+      "docsInWindow": 216000,
+      "guard": "allowed",
+      "p50": 1271.3,
+      "p95": 2937.7,
+      "min": 1178.7,
+      "max": 2937.7,
+      "runs": 9,
+      "interactive": false,
+      "before": {
+        "p50": 1271.3,
+        "p95": 2937.7,
+        "min": 1178.7,
+        "max": 2937.7,
+        "runs": 9
+      },
+      "after": {
+        "p50": 473,
+        "p95": 586.4,
+        "min": 371.4,
+        "max": 586.4,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "request rate by service (all 600 series)",
+      "window": "24 h",
+      "docsInWindow": 864000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 1210.8,
+      "p95": 1343.4,
+      "min": 1176.9,
+      "max": 1343.4,
+      "runs": 5,
+      "interactive": true,
+      "before": {
+        "p50": 1210.8,
+        "p95": 1343.4,
+        "min": 1176.9,
+        "max": 1343.4,
+        "runs": 5
+      },
+      "after": {
+        "p50": 273,
+        "p95": 323.2,
+        "min": 256.4,
+        "max": 323.2,
+        "runs": 5
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "p99 across everything (all 600 series)",
+      "window": "24 h",
+      "docsInWindow": 864000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 2561.4,
+      "p95": 2649.3,
+      "min": 2434.7,
+      "max": 2649.3,
+      "runs": 5,
+      "interactive": false,
+      "before": {
+        "p50": 2561.4,
+        "p95": 2649.3,
+        "min": 2434.7,
+        "max": 2649.3,
+        "runs": 5
+      },
+      "after": {
+        "p50": 577.2,
+        "p95": 621.2,
+        "min": 541.4,
+        "max": 621.2,
+        "runs": 5
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "HTTP service overview (all 600 series)",
+      "window": "24 h",
+      "docsInWindow": 864000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 5849.1,
+      "p95": 5967.4,
+      "min": 5293.5,
+      "max": 5967.4,
+      "runs": 4,
+      "interactive": false,
+      "before": {
+        "p50": 5849.1,
+        "p95": 5967.4,
+        "min": 5293.5,
+        "max": 5967.4,
+        "runs": 4
+      },
+      "after": {
+        "p50": 551.3,
+        "p95": 553.5,
+        "min": 430.3,
+        "max": 553.5,
+        "runs": 4
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 1 h rollups, 2x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "p95 by route, one service (60 series)",
+      "window": "3 h",
+      "docsInWindow": 10800,
+      "guard": "allowed",
+      "p50": 77.8,
+      "p95": 83.8,
+      "min": 76.4,
+      "max": 83.8,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 77.8,
+        "p95": 83.8,
+        "min": 76.4,
+        "max": 83.8,
+        "runs": 9
+      },
+      "after": {
+        "p50": 79.3,
+        "p95": 95.7,
+        "min": 65.5,
+        "max": 95.7,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "request rate, one service (60 series)",
+      "window": "3 h",
+      "docsInWindow": 10800,
+      "guard": "allowed",
+      "p50": 34.9,
+      "p95": 41.5,
+      "min": 30.8,
+      "max": 41.5,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 34.9,
+        "p95": 41.5,
+        "min": 30.8,
+        "max": 41.5,
+        "runs": 9
+      },
+      "after": {
+        "p50": 34.9,
+        "p95": 50.2,
+        "min": 31.7,
+        "max": 50.2,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "p95 by route, one service (60 series)",
+      "window": "24 h",
+      "docsInWindow": 86400,
+      "guard": "allowed",
+      "p50": 422.8,
+      "p95": 746.1,
+      "min": 394.2,
+      "max": 746.1,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 422.8,
+        "p95": 746.1,
+        "min": 394.2,
+        "max": 746.1,
+        "runs": 9
+      },
+      "after": {
+        "p50": 99.2,
+        "p95": 146.6,
+        "min": 93.2,
+        "max": 146.6,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "request rate, one service (60 series)",
+      "window": "24 h",
+      "docsInWindow": 86400,
+      "guard": "allowed",
+      "p50": 141.6,
+      "p95": 193.4,
+      "min": 126.8,
+      "max": 193.4,
+      "runs": 9,
+      "interactive": true,
+      "before": {
+        "p50": 141.6,
+        "p95": 193.4,
+        "min": 126.8,
+        "max": 193.4,
+        "runs": 9
+      },
+      "after": {
+        "p50": 44.5,
+        "p95": 47.1,
+        "min": 41.9,
+        "max": 47.1,
+        "runs": 9
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "p95 by route, one service (60 series)",
+      "window": "7 d",
+      "docsInWindow": 604800,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 3942.7,
+      "p95": 6562.9,
+      "min": 3764.2,
+      "max": 6562.9,
+      "runs": 4,
+      "interactive": false,
+      "before": {
+        "p50": 3942.7,
+        "p95": 6562.9,
+        "min": 3764.2,
+        "max": 6562.9,
+        "runs": 4
+      },
+      "after": {
+        "p50": 67.2,
+        "p95": 67.2,
+        "min": 59,
+        "max": 67.2,
+        "runs": 4
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 1 h rollups, 2x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "request rate, one service (60 series)",
+      "window": "7 d",
+      "docsInWindow": 604800,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 1674,
+      "p95": 1824.4,
+      "min": 1576.2,
+      "max": 1824.4,
+      "runs": 4,
+      "interactive": true,
+      "before": {
+        "p50": 1674,
+        "p95": 1824.4,
+        "min": 1576.2,
+        "max": 1824.4,
+        "runs": 4
+      },
+      "after": {
+        "p50": 46.6,
+        "p95": 47.6,
+        "min": 44.1,
+        "max": 47.6,
+        "runs": 4
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 1 h rollups, 2x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "request rate by service (all 600 series)",
+      "window": "7 d",
+      "docsInWindow": 6048000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "p50": 10459.4,
+      "p95": 10459.4,
+      "min": 9022.8,
+      "max": 10459.4,
+      "runs": 2,
+      "interactive": false,
+      "before": {
+        "p50": 10459.4,
+        "p95": 10459.4,
+        "min": 9022.8,
+        "max": 10459.4,
+        "runs": 2
+      },
+      "after": {
+        "p50": 283.7,
+        "p95": 283.7,
+        "min": 227.1,
+        "max": 283.7,
+        "runs": 2
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 1 h rollups, 2x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "p99 across everything (all 600 series)",
+      "window": "7 d",
+      "docsInWindow": 6048000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "interactive": false,
+      "before": null,
+      "beforeNote": "exceeded the 8 s query timeout (maxTimeMS) with minute documents only",
+      "after": {
+        "p50": 515.5,
+        "p95": 515.5,
+        "min": 417.7,
+        "max": 515.5,
+        "runs": 2
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 1 h rollups, 2x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "HTTP service overview (all 600 series)",
+      "window": "7 d",
+      "docsInWindow": 6048000,
+      "guard": "refused",
+      "refusal": "This query would read more than 250,000 stored measurements. Narrow the time range, add a ",
+      "interactive": false,
+      "before": null,
+      "beforeNote": "exceeded the 8 s query timeout (maxTimeMS) with minute documents only",
+      "after": {
+        "p50": 725.3,
+        "p95": 725.3,
+        "min": 714.8,
+        "max": 725.3,
+        "runs": 2
+      },
+      "guardAfter": "allowed",
+      "readsAfter": "1x 1 h rollups, 2x 5 min rollups, 2x minute docs",
+      "interactiveAfter": true
+    },
+    {
+      "name": "metric catalogue (names)",
+      "window": "any",
+      "guard": "n/a",
+      "p50": 4.2,
+      "p95": 4.7,
+      "min": 4.1,
+      "max": 4.7,
+      "runs": 5
+    },
+    {
+      "name": "label values (labels)",
+      "window": "any",
+      "guard": "n/a",
+      "p50": 8.1,
+      "p95": 9.5,
+      "min": 7.9,
+      "max": 9.5,
+      "runs": 5
+    }
+  ],
+  "sanityOverview24h": {
+    "sameRequestsErrorsP95": true
+  },
+  "measuredAt": "2026-11-02T06:45:32.645Z"
+}

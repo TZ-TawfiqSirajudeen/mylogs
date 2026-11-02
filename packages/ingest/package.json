@@ -10,7 +10,9 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "bench": "tsx bench/bench.ts",
-    "bench:signals": "tsx bench/bench-signals.ts"
+    "bench:signals": "tsx bench/bench-signals.ts",
+    "bench:windows": "tsx bench/bench-windows.ts",
+    "profile:metrics": "tsx bench/profile-metrics.ts"
   },
   "dependencies": {
     "@nexus/database": "workspace:*",

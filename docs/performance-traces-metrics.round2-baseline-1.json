@@ -1,0 +1,264 @@
+{
+  "machine": {
+    "cpus": 8,
+    "cpuModel": "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz",
+    "memGiB": 16,
+    "node": "v22.17.0"
+  },
+  "targets": "see the header of packages/ingest/bench/bench-signals.ts (written before the first run)",
+  "traceDataset": {
+    "traces": 20000,
+    "spans": 391200,
+    "spansAcceptedByPipeline": 391200,
+    "rejected": 0,
+    "spanWindowHours": 6,
+    "avgSpansPerTrace": 20
+  },
+  "traceIngestion": {
+    "spansPerSecond": 6246,
+    "seconds": 62.6,
+    "requestSpansApprox": 1565,
+    "concurrency": 4,
+    "batchLatencyMs": {
+      "p50": 938.5,
+      "p95": 1281.6,
+      "max": 1612.3
+    },
+    "includesSummaryRecompute": true
+  },
+  "traceQueries": [
+    {
+      "name": "trace lookup by id (getTrace, ~20-40 spans)",
+      "p50": 4.9,
+      "p95": 6.9,
+      "max": 6.9,
+      "runs": 15
+    },
+    {
+      "name": "waterfall load of a large trace (432 spans)",
+      "p50": 31.1,
+      "p95": 34.5,
+      "max": 34.5,
+      "runs": 10
+    },
+    {
+      "name": "search: newest 50 (6 h)",
+      "p50": 4.5,
+      "p95": 8,
+      "max": 8,
+      "runs": 15
+    },
+    {
+      "name": "search: errors only (6 h)",
+      "p50": 7.1,
+      "p95": 46.8,
+      "max": 46.8,
+      "runs": 15
+    },
+    {
+      "name": "search: one service (6 h)",
+      "p50": 2.8,
+      "p95": 5.6,
+      "max": 5.6,
+      "runs": 15
+    },
+    {
+      "name": "search: HTTP status 500 (6 h)",
+      "p50": 13.6,
+      "p95": 36.1,
+      "max": 36.1,
+      "runs": 15
+    },
+    {
+      "name": "search: db system = redis (6 h)",
+      "p50": 4.9,
+      "p95": 8.1,
+      "max": 8.1,
+      "runs": 15
+    },
+    {
+      "name": "search: duration >= 300 ms (6 h)",
+      "p50": 7.8,
+      "p95": 17.5,
+      "max": 17.5,
+      "runs": 15
+    },
+    {
+      "name": "search: span name contains \"orders.find\" (6 h)",
+      "p50": 6.1,
+      "p95": 9.5,
+      "max": 9.5,
+      "runs": 8
+    },
+    {
+      "name": "search: by trace id",
+      "p50": 2.5,
+      "p95": 3.7,
+      "max": 3.7,
+      "runs": 15
+    },
+    {
+      "name": "search: slowest first (6 h)",
+      "p50": 4.5,
+      "p95": 7.3,
+      "max": 7.3,
+      "runs": 15
+    },
+    {
+      "name": "deep page (cursor after 1,000 traces)",
+      "p50": 19,
+      "p95": 33,
+      "max": 33,
+      "runs": 15
+    },
+    {
+      "name": "per-service SERVER span statistics (6 h, all spans)",
+      "p50": 804.5,
+      "p95": 880.6,
+      "max": 880.6,
+      "runs": 5
+    },
+    {
+      "name": "observed dependencies (6 h)",
+      "p50": 1141.7,
+      "p95": 1966.4,
+      "max": 1966.4,
+      "runs": 5
+    },
+    {
+      "name": "server span timeline (6 h, 6-minute windows)",
+      "p50": 454.4,
+      "p95": 518.8,
+      "max": 518.8,
+      "runs": 5
+    }
+  ],
+  "traceMixedLoad": {
+    "durationSec": 5,
+    "ingestedSpansPerSecond": 639,
+    "concurrentReaders": 8,
+    "readerQueries": 835,
+    "readerLatencyMs": {
+      "p50": 49.1,
+      "p95": 66.9
+    }
+  },
+  "backpressure": {
+    "concurrentRequests": 8,
+    "accepted": 1,
+    "refused503": 7
+  },
+  "recovery": {
+    "outageMs": 2000,
+    "refusedWhileDown": 7,
+    "firstSuccessAfterMs": 2177,
+    "batchesLost": 0,
+    "batchesSent": 10
+  },
+  "metricDataset": {
+    "series": 600,
+    "hours": 3,
+    "intervalSeconds": 10,
+    "dataPoints": 648000,
+    "instancesPerService": 3
+  },
+  "metricIngestion": {
+    "pointsPerSecond": 2356,
+    "seconds": 275.1,
+    "requests": 4320,
+    "pointsPerRequest": 150,
+    "concurrency": 4,
+    "model": "each writer = one exporter fleet owning distinct services, ticks in order",
+    "requestLatencyMs": {
+      "p50": 229.2,
+      "p95": 311.2,
+      "max": 809.8
+    }
+  },
+  "metricQueries": [
+    {
+      "name": "metric catalogue (names)",
+      "p50": 7.4,
+      "p95": 12.9,
+      "max": 12.9,
+      "runs": 10
+    },
+    {
+      "name": "label values (labels)",
+      "p50": 17.4,
+      "p95": 22.4,
+      "max": 22.4,
+      "runs": 10
+    },
+    {
+      "name": "p95 by route, one service (3 h)",
+      "p50": 116.4,
+      "p95": 123.3,
+      "max": 123.3,
+      "runs": 8
+    },
+    {
+      "name": "request rate, all services, by service (3 h)",
+      "p50": 813.8,
+      "p95": 877.1,
+      "max": 877.1,
+      "runs": 5
+    },
+    {
+      "name": "p99 across everything (3 h)",
+      "p50": 2170.8,
+      "p95": 2820.4,
+      "max": 2820.4,
+      "runs": 5
+    },
+    {
+      "name": "HTTP service overview (3 h)",
+      "p50": 2606.6,
+      "p95": 2917.3,
+      "max": 2917.3,
+      "runs": 5
+    },
+    {
+      "name": "diagnostics",
+      "p50": 144.2,
+      "p95": 191.4,
+      "max": 191.4,
+      "runs": 5
+    }
+  ],
+  "metricGroupedQueryResultSeries": 20,
+  "storage": {
+    "spans": {
+      "docs": 391200,
+      "dataMiB": 373.1,
+      "storageMiB": 66.7,
+      "indexMiB": 113.1,
+      "bytesPerSpanOnDisk": 179
+    },
+    "traceSummaries": {
+      "docs": 20000,
+      "storageMiB": 5.2,
+      "indexMiB": 14.3
+    },
+    "metricPoints": {
+      "docs": 108600,
+      "storageMiB": 12,
+      "indexMiB": 24.5
+    },
+    "metricSeries": {
+      "docs": 600,
+      "storageMiB": 1.2
+    }
+  },
+  "memory": {
+    "peakRssMiB": 485,
+    "peakHeapUsedMiB": 355,
+    "note": "the Node process generating load AND running the pipelines (mongod runs separately and is not included)"
+  },
+  "caveats": [
+    "single mongod, in-memory-server defaults, same machine as the load generator",
+    "in-process pipelines: HTTP/TLS excluded",
+    "summary recompute runs inside every trace write (included in ingestion figures)"
+  ],
+  "measuredAt": "2026-10-31T07:37:21.367Z"
+}

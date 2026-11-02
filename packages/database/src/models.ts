@@ -206,6 +206,15 @@ export interface MetricSeriesDoc {
   /** Last cumulative observation, used to turn cumulative series into deltas (reset-aware). Null for delta/gauge series. */
   cumulative: { time: Date; startTime: Date | null; value: number; count: number; sum: number; buckets: number[] | null } | null;
   expireAt: Date;
+  // ---- rollup bookkeeping (see ADR-0007; every field is optional: series written before rollups existed simply have none) ----
+  /** Earliest minute written since the compactor last claimed this series (set by the write path with `$min`, in the same update that changes the series state). */
+  rollFrom?: Date;
+  /** Earliest minute of a claim the compactor is still processing (so a crash resumes the same range). */
+  rollWork?: Date;
+  /** Exclusive end of the range already rolled up into the 5-minute / 1-hour tier (from the series' first minute document up to here). */
+  rolled5?: Date; rolled60?: Date;
+  /** Lease so two compactors never process one series at the same time. */
+  rollLease?: { owner: string; until: Date };
 }
 export interface MetricExemplarDoc { traceId: string; spanId: string | null; value: number; ts: Date }
 /** Pre-aggregated measurements of one series in one minute. Histograms keep bucket counts, so percentiles can be merged correctly. */
@@ -220,6 +229,17 @@ export interface MetricPointDoc {
   buckets: number[] | null;
   exemplars: MetricExemplarDoc[];
   expireAt: Date;
+}
+
+/**
+ * Coarser copy of `MetricPointDoc` (one document per series per 5-minute or 1-hour bucket): same field names, so the same aggregation pipeline reads both.
+ * `minute` is the START of the bucket. Rebuildable at any time from the minute documents; never the source of truth.
+ */
+export interface MetricRollupDoc extends MetricPointDoc {
+  /** Bucket length in minutes (5 or 60). */
+  tier: number;
+  /** Newest minute document folded into the bucket (the "last data at" of the series). */
+  lastMinute: Date;
 }
 
 /** Service inventory: one row per service per environment, maintained from valid `service.name` resources on ingest. */
@@ -275,6 +295,7 @@ export interface Collections {
   traceSummaries: Collection<TraceSummaryDoc>;
   metricSeries: Collection<MetricSeriesDoc>;
   metricPoints: Collection<MetricPointDoc>;
+  metricRollups: Collection<MetricRollupDoc>;
   services: Collection<ServiceDoc>;
 }
 
@@ -301,6 +322,7 @@ export function collections(db: Db): Collections {
     traceSummaries: db.collection('trace_summaries'),
     metricSeries: db.collection('metric_series'),
     metricPoints: db.collection('metric_points'),
+    metricRollups: db.collection('metric_rollups'),
     services: db.collection('services'),
   };
 }

@@ -1,0 +1,100 @@
+{
+  "what": "metric ingestion throughput (points/s), alternating A/B/C in one process; A = no rollup marker, B = marker (shipped), C = marker + compactor pass every 2 s, D = marker + compactor back to back (worst case)",
+  "shape": {
+    "writers": 4,
+    "seriesPerRequest": 150,
+    "pointsPerSeriesPerRequest": 1,
+    "ticks": 60,
+    "rounds": 6
+  },
+  "summary": {
+    "A": {
+      "runs": [
+        5860,
+        5615,
+        5629,
+        5854,
+        5347,
+        5990
+      ],
+      "median": 5854,
+      "best": 5990,
+      "min": 5347
+    },
+    "B": {
+      "runs": [
+        5622,
+        5362,
+        5664,
+        5501,
+        5766,
+        5687
+      ],
+      "median": 5664,
+      "best": 5766,
+      "min": 5362
+    },
+    "C": {
+      "runs": [
+        4259,
+        4779,
+        4767,
+        4071,
+        4721,
+        4774
+      ],
+      "median": 4767,
+      "best": 4779,
+      "min": 4071
+    },
+    "D": {
+      "runs": [
+        4262,
+        4464,
+        4073,
+        4115,
+        4433,
+        4028
+      ],
+      "median": 4262,
+      "best": 4464,
+      "min": 4028
+    }
+  },
+  "medianRatioBOverA": 0.968,
+  "medianRatioCOverA": 0.814,
+  "medianRatioDOverA": 0.728,
+  "machine": {
+    "cpus": 8,
+    "cpuModel": "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz",
+    "memGiB": 16,
+    "node": "v22.17.0"
+  },
+  "loadavg1mAtRoundStarts": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "measuredAt": "2026-11-02T07:04:29.959Z"
+}

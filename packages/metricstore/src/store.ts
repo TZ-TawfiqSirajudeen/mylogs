@@ -4,6 +4,7 @@ import type { ClientSession, Database, KV, MetricExemplarDoc, MetricPointDoc, Me
 import type { MetricPointDraft } from '@nexus/telemetry';
 import { boundsKey, histogramQuantile } from './histogram.js';
 import { MINUTE, processSeriesPoints, type MinuteAgg } from './process.js';
+import { pieceDocs, planGroups, snapStep, type Piece, type PlanGroup, type PlanSeries } from './rollup.js';
 
 export const QUERY_TIMEOUT_MS = 8_000;
 /**
@@ -14,6 +15,11 @@ export const QUERY_TIMEOUT_MS = 8_000;
 export const MAX_SERIES_PER_METRIC = 2_000;
 export const MAX_SERIES_PER_ENVIRONMENT = 20_000;
 const SERIES_PER_TXN = 400;
+/** Aggregations over more series than this are split into parallel chunks of about this size (see aggregateWindows). */
+export const CHUNK_SERIES = 100;
+const MAX_CHUNKS = 8;
+/** Aggregation pipelines one store instance keeps running at the same time (measured: more only queues inside mongod on an 8-core host). */
+const AGGREGATION_SLOTS = 8;
 
 export interface Scope { orgId: string; projectId: string; environmentIds: string[] }
 export interface MetricContext { orgId: string; projectId: string; environmentId: string; retentionMs: number }
@@ -91,7 +97,16 @@ export class MongoMetricStore implements MetricStore {
   private readonly maxPointDocs: number;
   private readonly maxSeriesPerMetric: number;
   private readonly maxSeriesPerEnvironment: number;
-  constructor(private readonly db: Database, opts: { maxPointDocsScanned?: number; maxSeriesPerMetric?: number; maxSeriesPerEnvironment?: number } = {}) {
+  private readonly chunkSeries: number;
+  private readonly useRollups: boolean;
+  private readonly overviewStepOverride?: (from: Date, to: Date) => number;
+  private readonly onPlan?: (groups: { series: number; pieces: Piece[] }[]) => void;
+  constructor(private readonly db: Database, opts: { maxPointDocsScanned?: number; maxSeriesPerMetric?: number; maxSeriesPerEnvironment?: number; chunkSeries?: number; aggregationSlots?: number; rollups?: boolean; onPlan?: (groups: { series: number; pieces: Piece[] }[]) => void; overviewStep?: (from: Date, to: Date) => number } = {}) {
+    this.useRollups = opts.rollups !== false;
+    this.overviewStepOverride = opts.overviewStep; // benchmarks only: reproduces the one-point-per-minute timeline of Rounds 1 and 2
+    this.onPlan = opts.onPlan;
+    this.chunkSeries = Math.max(1, opts.chunkSeries ?? CHUNK_SERIES);
+    this.slotsFree = Math.max(1, opts.aggregationSlots ?? AGGREGATION_SLOTS);
     this.maxPointDocs = opts.maxPointDocsScanned ?? METRIC_LIMITS.maxPointDocsScanned;
     this.maxSeriesPerMetric = opts.maxSeriesPerMetric ?? MAX_SERIES_PER_METRIC;
     this.maxSeriesPerEnvironment = opts.maxSeriesPerEnvironment ?? MAX_SERIES_PER_ENVIRONMENT;
@@ -137,6 +152,7 @@ export class MongoMetricStore implements MetricStore {
     const seriesWrites: unknown[] = [];
     const createWrites: unknown[] = [];
     const incWrites: unknown[] = [];
+    const freshWrites: unknown[] = [];
     const expireFor = (t: Date) => new Date(t.getTime() + ctx.retentionMs);
 
     for (const [id, pts] of chunk) {
@@ -158,33 +174,69 @@ export class MongoMetricStore implements MetricStore {
           attrs: first.attrs, bounds: first.bounds, firstSeen: now, lastSeen: now, lastPoint: new Date(0), recent: [], cumulative: null, expireAt: expireFor(pts[pts.length - 1]!.time),
         };
       }
+      // What the series state PROVES about minute documents (this transaction read the state in a snapshot, and a concurrent writer of the same series
+      // conflicts on the series write and is retried, so the state cannot be stale when it commits):
+      //  - a minute after the minute of `lastPoint` has no document yet (documents are only created by accepted points, which advance lastPoint);
+      //  - the minute of `lastPoint` already has one, except for a cumulative series, whose very first point is a baseline and writes nothing.
+      const lastMin = series.lastPoint.getTime() === 0 ? Number.NEGATIVE_INFINITY : Math.floor(series.lastPoint.getTime() / MINUTE) * MINUTE;
+      const cumulativeSeries = series.temporality === 'cumulative' && series.type !== 'gauge';
       const r = processSeriesPoints(series, { lastPoint: series.lastPoint.getTime() === 0 ? null : series.lastPoint, cumulative: series.cumulative, recent: series.recent ?? [] }, pts);
       res.accepted += r.accepted; res.duplicates += r.duplicates; res.baselines += r.baselines; res.resets += r.resets;
       if (r.accepted === 0) continue;
       const newest = r.state.lastPoint!;
+      // Rollup invalidation marker (rollup.ts): the earliest minute this request touched. Same update, same transaction, no extra operation.
+      const rollFrom = new Date(Math.min(...r.aggs.keys()));
       const next: MetricSeriesDoc = {
         ...series, unit: first.unit ?? series.unit, description: first.description ?? series.description, serviceVersion: first.serviceVersion ?? series.serviceVersion,
-        lastSeen: now, lastPoint: newest, recent: r.state.recent, cumulative: r.state.cumulative, expireAt: expireFor(newest),
+        lastSeen: now, lastPoint: newest, recent: r.state.recent, cumulative: r.state.cumulative, expireAt: expireFor(newest), rollFrom,
       };
       // Batched: one round trip for all series of the chunk instead of one per series.
-      seriesWrites.push(existing.has(id) ? { replaceOne: { filter: { _id: id }, replacement: next } } : { insertOne: { document: next } });
+      // An existing series only changes its mutable state (the descriptive fields only when they actually changed): a targeted $set instead of
+      // re-sending the whole document (attributes, bounds, ...) on every request.
+      const changedMeta: Record<string, unknown> = {};
+      if (next.unit !== series.unit) changedMeta.unit = next.unit;
+      if (next.description !== series.description) changedMeta.description = next.description;
+      if (next.serviceVersion !== series.serviceVersion) changedMeta.serviceVersion = next.serviceVersion;
+      seriesWrites.push(existing.has(id)
+        ? { updateOne: { filter: { _id: id }, update: { $set: { lastSeen: next.lastSeen, lastPoint: next.lastPoint, recent: next.recent, cumulative: next.cumulative, expireAt: next.expireAt, ...changedMeta }, $min: { rollFrom } } } }
+        : { insertOne: { document: next } });
       for (const a of r.aggs.values()) {
         if (a.count === 0 && a.sum === 0 && !a.buckets) continue; // a baseline-only minute holds no measurement
         const base = { orgId: ctx.orgId, projectId: ctx.projectId, environmentId: ctx.environmentId, seriesId: id, metric: first.name, service: first.service, type: first.type };
         const expireAt = expireFor(new Date(a.minute + MINUTE));
-        if (a.lastAt) {
+        const docId = `${id}:${a.minute}`;
+        const fresh = a.minute > lastMin; // proven: this series-minute has no document yet
+        // The whole document in one write, with exactly the shape the incremental path produces (min/max stay ABSENT until a value exists:
+        // $min/$max would compare against null otherwise). $setOnInsert never overwrites, so a surprise duplicate cannot destroy data.
+        const wholeDoc = () => ({
+          ...base, minute: new Date(a.minute), count: a.count, sum: a.sum, last: a.lastAt ? a.last : null, lastAt: a.lastAt, buckets: a.buckets ? [...a.buckets] : null,
+          exemplars: a.exemplars, expireAt, ...(a.min !== null ? { min: a.min } : {}), ...(a.max !== null ? { max: a.max } : {}),
+        });
+        if (fresh) {
+          freshWrites.push({ updateOne: { filter: { _id: docId }, update: { $setOnInsert: wholeDoc() }, upsert: true } });
+        } else if (a.lastAt) {
           // Gauges: "the newest value wins" is decided by timestamp, which needs the aggregation-pipeline update.
-          pointWrites.push({ updateOne: { filter: { _id: `${id}:${a.minute}` }, update: mergeStage(a, base, expireAt), upsert: true } });
+          pointWrites.push({ updateOne: { filter: { _id: docId }, update: mergeStage(a, base, expireAt), upsert: true } });
+        } else if (!a.buckets && !a.exemplars.length) {
+          // A counter into an existing or unknown minute: ONE upsert is correct in both cases ($inc creates the fields; no array has to exist first).
+          incWrites.push({
+            updateOne: {
+              filter: { _id: docId }, upsert: true,
+              update: { $setOnInsert: { ...base, minute: new Date(a.minute), last: null, lastAt: null, buckets: null, exemplars: [] }, $inc: { count: a.count, sum: a.sum }, $max: { expireAt, ...(a.max !== null ? { max: a.max } : {}) }, ...(a.min !== null ? { $min: { min: a.min } } : {}) },
+            },
+          });
         } else {
+          const knownToExist = a.minute === lastMin && !cumulativeSeries; // delta/gauge points always write their minute; a cumulative baseline does not
+          // (histograms need their bucket array to exist before $inc can address a position, so an unknown minute is created first)
           // Counters and histograms: plain update operators (much cheaper than a pipeline). The document is created first (empty), then incremented;
           // min/max are left absent until a value exists because $min/$max would otherwise compare against null.
           const n = a.buckets?.length ?? 0;
-          createWrites.push({ updateOne: { filter: { _id: `${id}:${a.minute}` }, upsert: true, update: { $setOnInsert: { ...base, minute: new Date(a.minute), count: 0, sum: 0, last: null, lastAt: null, buckets: n ? new Array<number>(n).fill(0) : null, exemplars: [] } } } });
+          if (!knownToExist) createWrites.push({ updateOne: { filter: { _id: docId }, upsert: true, update: { $setOnInsert: { ...base, minute: new Date(a.minute), count: 0, sum: 0, last: null, lastAt: null, buckets: n ? new Array<number>(n).fill(0) : null, exemplars: [] } } } });
           const inc: Record<string, number> = { count: a.count, sum: a.sum };
           if (a.buckets) a.buckets.forEach((v, i) => { if (v) inc[`buckets.${i}`] = v; });
           incWrites.push({
             updateOne: {
-              filter: { _id: `${id}:${a.minute}` },
+              filter: { _id: docId },
               update: {
                 $inc: inc, $max: { expireAt, ...(a.max !== null ? { max: a.max } : {}) }, ...(a.min !== null ? { $min: { min: a.min } } : {}),
                 ...(a.exemplars.length ? { $push: { exemplars: { $each: a.exemplars, $slice: -5 } } } : {}),
@@ -195,6 +247,7 @@ export class MongoMetricStore implements MetricStore {
       }
     }
     if (seriesWrites.length) await this.db.c.metricSeries.bulkWrite(seriesWrites as never, { session, ordered: false });
+    if (freshWrites.length) await this.db.c.metricPoints.bulkWrite(freshWrites as never, { session, ordered: false });
     if (createWrites.length) await this.db.c.metricPoints.bulkWrite(createWrites as never, { session, ordered: false });
     if (incWrites.length) await this.db.c.metricPoints.bulkWrite(incWrites as never, { session, ordered: false });
     if (pointWrites.length) await this.db.c.metricPoints.bulkWrite(pointWrites as never, { session, ordered: false });
@@ -222,31 +275,142 @@ export class MongoMetricStore implements MetricStore {
   private floor(from: Date) { return new Date(Math.floor(from.getTime() / MINUTE) * MINUTE); }
 
   /**
-   * Refuses (with advice) a query that would scan more stored measurements than allowed. The count uses the index only (nothing is read), and
-   * stops at the limit, so the guard itself is cheap even when the answer is "far too many".
+   * The time ranges (and which tier to read them from) for each group of series, see `planGroups`. The minute documents of a window are those with
+   * `floor(from) <= minute <= to`, i.e. the half-open range [floor(from), floor(to) + 1 minute).
    */
-  private async guardScan(ids: string[], from: Date, to: Date) {
-    const n = await this.db.c.metricPoints.countDocuments({ seriesId: { $in: ids }, minute: { $gte: this.floor(from), $lte: to } }, { limit: this.maxPointDocs + 1, maxTimeMS: QUERY_TIMEOUT_MS });
-    if (n > this.maxPointDocs) {
+  private plan<S extends PlanSeries>(series: S[], from: Date, to: Date, stepMs: number | null): PlanGroup<S>[] {
+    const groups = planGroups(series, this.floor(from).getTime(), Math.floor(to.getTime() / MINUTE) * MINUTE + MINUTE, stepMs, { enabled: this.useRollups });
+    this.onPlan?.(groups.map((g) => ({ series: g.series.length, pieces: g.pieces })));
+    return groups;
+  }
+
+  private pieceFilter(ids: string[], p: Piece) {
+    const range = { $gte: new Date(p.lo), $lt: new Date(p.hi) };
+    return p.tier === 1 ? { seriesId: { $in: ids }, minute: range } : { seriesId: { $in: ids }, tier: p.tier, minute: range };
+  }
+  private pieceCollection(p: Piece) { return (p.tier === 1 ? this.db.c.metricPoints : this.db.c.metricRollups) as unknown as typeof this.db.c.metricPoints; }
+
+  /** One task per (group, piece), with the series split into parallel chunks when the piece is big (same rule for windows and totals). */
+  private tasks(groups: PlanGroup[]): { ids: string[]; piece: Piece }[] {
+    const out: { ids: string[]; piece: Piece }[] = [];
+    for (const g of groups) {
+      const ids = g.series.map((s) => s._id);
+      for (const piece of g.pieces) {
+        const docs = ids.length * pieceDocs(piece);
+        const parts = docs <= this.chunkSeries * 270 ? 1 : Math.min(MAX_CHUNKS, ids.length, Math.ceil(docs / (this.chunkSeries * 180)));
+        const size = Math.ceil(ids.length / parts);
+        for (let i = 0; i < ids.length; i += size) out.push({ ids: ids.slice(i, i + size), piece });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Refuses (with advice) a query that would scan more stored documents than allowed. The count uses the index only (nothing is read), and
+   * stops at the limit, so the guard itself is cheap even when the answer is "far too many". Rollup buckets count as documents: a rollup read is
+   * allowed when IT is small enough, which is what makes long windows possible at all.
+   */
+  private async guardScan(groups: PlanGroup[]) {
+    const tasks = groups.flatMap((g) => g.pieces.map((piece) => ({ ids: g.series.map((s) => s._id), piece })));
+    // Each series has at most one document per bucket, so ids x buckets is an upper bound: when even that is within the limit, nothing needs counting.
+    if (tasks.reduce((n, t) => n + t.ids.length * (pieceDocs(t.piece) + 1), 0) <= this.maxPointDocs) return;
+    const counts = await Promise.all(tasks.map((t) => this.pieceCollection(t.piece).countDocuments(this.pieceFilter(t.ids, t.piece), { limit: this.maxPointDocs + 1, maxTimeMS: QUERY_TIMEOUT_MS })));
+    if (counts.reduce((a, b) => a + b, 0) > this.maxPointDocs) {
       throw new MetricQueryError(422, 'query_too_expensive', `This query would read more than ${this.maxPointDocs.toLocaleString('en')} stored measurements. Narrow the time range, add a service or label filter, or group by fewer labels.`);
     }
   }
 
   /**
-   * Merges stored minute buckets of the given series into query windows INSIDE MongoDB: only one row per window comes back, however many
-   * series or minutes are involved. All `ids` must share one histogram bucket layout (`nBuckets` entries), so bucket counts can be added
+   * Merges stored buckets of the given series into query windows INSIDE MongoDB: only one row per window comes back, however many
+   * series or buckets are involved. All `series` must share one histogram bucket layout (`nBuckets` entries), so bucket counts can be added
    * position by position; percentiles are computed later from these merged counts.
    */
-  private async aggregateWindows(ids: string[], from: Date, to: Date, stepMs: number, o: { nBuckets: number; gauge?: boolean; exemplars?: boolean }): Promise<WindowRow[]> {
+  private async aggregateWindows(series: MetricSeriesDoc[], from: Date, to: Date, stepMs: number, o: { nBuckets: number; gauge?: boolean; exemplars?: boolean }): Promise<WindowRow[]> {
+    // One $group runs on ONE core inside mongod, however many series it covers. Large series sets are therefore cut into chunks that run side by side
+    // (bounded by a store-wide slot pool so concurrent queries cannot flood the server); every aggregate involved is additive (count, sum, bucket
+    // counts), min/max combine, and the "newest gauge value" is decided by timestamp, so merging the chunk and piece results is exact.
+    const tasks = this.tasks(this.plan(series, from, to, stepMs));
+    const all = await Promise.all(tasks.map((t) => this.aggregateChunk(t.ids, t.piece, stepMs, o)));
+    if (all.length === 1) return all[0]!;
+    const merged = new Map<number, WindowRow>();
+    for (const rows of all) for (const r of rows) {
+      const m = merged.get(r.t);
+      if (!m) { merged.set(r.t, { ...r, buckets: [...r.buckets], exemplars: [...r.exemplars] }); continue; }
+      m.count += r.count; m.sum += r.sum;
+      if (r.min !== null) m.min = m.min === null ? r.min : Math.min(m.min, r.min);
+      if (r.max !== null) m.max = m.max === null ? r.max : Math.max(m.max, r.max);
+      if (r.last !== null && r.lastAt >= m.lastAt) { m.last = r.last; m.lastAt = r.lastAt; }
+      for (let i = 0; i < m.buckets.length; i++) m.buckets[i]! += r.buckets[i] ?? 0;
+      m.exemplars.push(...r.exemplars);
+    }
+    return [...merged.values()];
+  }
+
+  /**
+   * Per-series totals (count, newest data, bucket counts) over the whole range, summed inside MongoDB: one row per series, never one per stored
+   * document. Chunks never overlap in series, pieces of one series add up.
+   */
+  private async seriesTotals(series: MetricSeriesDoc[], from: Date, to: Date, nBuckets: number): Promise<Map<string, { count: number; lastMin: number; buckets: number[] }>> {
+    const bucketFields = Object.fromEntries(Array.from({ length: nBuckets }, (_, i) => [`b${i}`, { $sum: { $ifNull: [{ $arrayElemAt: ['$buckets', i] }, 0] } }]));
+    const tasks = this.tasks(this.plan(series, from, to, null));
+    const all = await Promise.all(tasks.map(async (t) => {
+      await this.acquireSlot();
+      try {
+        return await this.pieceCollection(t.piece).aggregate<Record<string, unknown> & { _id: string }>([
+          { $match: this.pieceFilter(t.ids, t.piece) },
+          { $group: { _id: '$seriesId', count: { $sum: '$count' }, lastMin: { $max: t.piece.tier === 1 ? '$minute' : '$lastMinute' }, ...bucketFields } },
+        ], { maxTimeMS: QUERY_TIMEOUT_MS, allowDiskUse: true }).toArray();
+      } finally { this.releaseSlot(); }
+    }));
+    const out = new Map<string, { count: number; lastMin: number; buckets: number[] }>();
+    for (const rows of all) for (const r of rows) {
+      const e = out.get(r._id) ?? { count: 0, lastMin: 0, buckets: new Array<number>(nBuckets).fill(0) };
+      e.count += Number(r.count);
+      if (r.lastMin instanceof Date) e.lastMin = Math.max(e.lastMin, r.lastMin.getTime());
+      for (let i = 0; i < nBuckets; i++) e.buckets[i]! += Number(r[`b${i}`] ?? 0);
+      out.set(r._id, e);
+    }
+    return out;
+  }
+
+  private async aggregateChunk(ids: string[], piece: Piece, stepMs: number, o: { nBuckets: number; gauge?: boolean; exemplars?: boolean }): Promise<WindowRow[]> {
+    await this.acquireSlot();
+    try { return await this.aggregatePiece(ids, piece, stepMs, o); } finally { this.releaseSlot(); }
+  }
+
+  private slotsFree = AGGREGATION_SLOTS;
+  private readonly slotWaiters: (() => void)[] = [];
+  private acquireSlot(): Promise<void> {
+    if (this.slotsFree > 0) { this.slotsFree--; return Promise.resolve(); }
+    return new Promise((resolve) => this.slotWaiters.push(resolve));
+  }
+  private releaseSlot() {
+    const next = this.slotWaiters.shift();
+    if (next) next(); else this.slotsFree++;
+  }
+
+  private async aggregatePiece(ids: string[], piece: Piece, stepMs: number, o: { nBuckets: number; gauge?: boolean; exemplars?: boolean }): Promise<WindowRow[]> {
     const bucketFields = Object.fromEntries(Array.from({ length: o.nBuckets }, (_, i) => [`b${i}`, { $sum: { $ifNull: [{ $arrayElemAt: ['$buckets', i] }, 0] } }]));
-    const rows = await this.db.c.metricPoints.aggregate<Record<string, unknown> & { _id: number }>([
-      { $match: { seriesId: { $in: ids }, minute: { $gte: this.floor(from), $lte: to } } },
+    const again = Object.fromEntries(Array.from({ length: o.nBuckets }, (_, i) => [`b${i}`, { $sum: `$b${i}` }]));
+    // TWO stages. Stage 1 groups the stored documents by their own minute / bucket start (a plain field: measured at about half the cost of computing a
+    // window key for every document); stage 2 folds those few rows into query windows. Every accumulator is associative (sums, min, max,
+    // "newest by timestamp"), so the two-stage result equals a single pass exactly. A rollup bucket lies inside one window (the planner guarantees it).
+    const rows = await this.pieceCollection(piece).aggregate<Record<string, unknown> & { _id: number }>([
+      { $match: this.pieceFilter(ids, piece) },
       {
         $group: {
-          _id: { $subtract: [{ $toLong: '$minute' }, { $mod: [{ $toLong: '$minute' }, stepMs] }] },
+          _id: '$minute',
           count: { $sum: '$count' }, sum: { $sum: '$sum' }, min: { $min: '$min' }, max: { $max: '$max' }, ...bucketFields,
-          ...(o.gauge ? { lastAt: { $max: '$lastAt' }, last: { $top: { sortBy: { lastAt: 1 }, output: '$last' } } } : {}),
+          ...(o.gauge ? { lastAt: { $max: '$lastAt' }, last: { $top: { sortBy: { lastAt: -1 }, output: '$last' } } } : {}),
           ...(o.exemplars ? { ex: { $top: { sortBy: { minute: -1 }, output: '$exemplars' } } } : {}),
+        },
+      },
+      {
+        $group: {
+          _id: { $subtract: [{ $toLong: '$_id' }, { $mod: [{ $toLong: '$_id' }, stepMs] }] },
+          count: { $sum: '$count' }, sum: { $sum: '$sum' }, min: { $min: '$min' }, max: { $max: '$max' }, ...again,
+          ...(o.gauge ? { lastAt: { $max: '$lastAt' }, last: { $top: { sortBy: { lastAt: -1 }, output: '$last' } } } : {}),
+          ...(o.exemplars ? { ex: { $top: { sortBy: { _id: -1 }, output: '$ex' } } } : {}),
         },
       },
     ], { maxTimeMS: QUERY_TIMEOUT_MS, allowDiskUse: true }).toArray();
@@ -258,11 +422,27 @@ export class MongoMetricStore implements MetricStore {
     }));
   }
 
+  /**
+   * The window length. Chosen automatically it is the smallest that keeps a series within the point limit, rounded UP to a whole number of rollup
+   * buckets (5 minutes from 3, 1 hour from 25: see `snapStep`) so long windows can be answered from rollups. A step the caller asked for is kept as asked.
+   */
   private stepFor(from: Date, to: Date, requested?: number): number {
     const span = to.getTime() - from.getTime();
     const auto = Math.ceil(span / METRIC_LIMITS.maxPointsPerSeries / MINUTE) * MINUTE;
-    const step = Math.max(MINUTE, Math.ceil((requested ? requested * 1000 : auto) / MINUTE) * MINUTE);
-    return Math.max(step, auto); // never more than maxPointsPerSeries points, whatever was asked for
+    const asked = requested ? Math.ceil((requested * 1000) / MINUTE) * MINUTE : 0;
+    const step = Math.max(MINUTE, asked || auto, auto); // never more than maxPointsPerSeries points, whatever was asked for
+    return step > asked ? snapStep(step) : step;
+  }
+
+  /**
+   * The overview timeline is a small chart, not a plot of every minute: about 48 points for anything longer than 90 minutes (3 h: 5-minute windows,
+   * 24 h: 1-hour windows), which is also what lets it read rollups. Up to 90 minutes it stays at one point per minute.
+   */
+  private overviewStep(from: Date, to: Date): number {
+    if (this.overviewStepOverride) return this.overviewStepOverride(from, to);
+    const span = to.getTime() - from.getTime();
+    const base = this.stepFor(from, to);
+    return span <= 90 * MINUTE ? base : snapStep(Math.max(base, Math.ceil(span / 48 / MINUTE) * MINUTE));
   }
 
   async query(scope: Scope, q: MetricQuery): Promise<MetricQueryResult> {
@@ -298,12 +478,11 @@ export class MongoMetricStore implements MetricStore {
       for (const k of q.groupBy) l[k] = k === 'service' ? s.service ?? '' : s.attrs.find((a) => a.k === k)?.v ?? '';
       return l;
     };
-    const ids = series.map((s) => s._id);
-    await this.guardScan(ids, from, to);
+    await this.guardScan(this.plan(series, from, to, stepMs));
 
     type Cell = { count: number; sum: number; min: number | null; max: number | null; last: number | null; lastAt: number; buckets: Map<string, number[]>; boundsBy: Map<string, number[]> };
     type Ex = { traceId: string; spanId: string | null; value: number; ts: Date };
-    type Group = { labels: Record<string, string>; subsets: Map<string, { ids: string[]; bounds: number[] | null }>; cells: Map<number, Cell>; volume: number; exemplars: Ex[] };
+    type Group = { labels: Record<string, string>; subsets: Map<string, { series: MetricSeriesDoc[]; bounds: number[] | null }>; cells: Map<number, Cell>; volume: number; exemplars: Ex[] };
     const groups = new Map<string, Group>();
     for (const s of series) {
       const labels = labelOf(s);
@@ -312,28 +491,27 @@ export class MongoMetricStore implements MetricStore {
       if (!g) { g = { labels, subsets: new Map(), cells: new Map(), volume: 0, exemplars: [] }; groups.set(gk, g); }
       const bk = boundsKey(s.bounds);
       const sub = g.subsets.get(bk);
-      if (sub) sub.ids.push(s._id); else g.subsets.set(bk, { ids: [s._id], bounds: s.bounds });
+      if (sub) sub.series.push(s); else g.subsets.set(bk, { series: [s], bounds: s.bounds });
     }
 
     // Many groups: rank them by volume with ONE cheap server-side pass (per-series totals), then aggregate only the largest.
     let ranked = [...groups.values()];
     let totalGroups = ranked.length;
     if (ranked.length > METRIC_LIMITS.maxResultSeries) {
-      const totals = await this.db.c.metricPoints.aggregate<{ _id: string; n: number }>([
-        { $match: { seriesId: { $in: ids }, minute: { $gte: this.floor(from), $lte: to } } }, { $group: { _id: '$seriesId', n: { $sum: '$count' } } },
-      ], { maxTimeMS: QUERY_TIMEOUT_MS }).toArray();
-      const vol = new Map(totals.map((t) => [t._id, t.n]));
-      for (const g of ranked) g.volume = [...g.subsets.values()].reduce((n, sub) => n + sub.ids.reduce((m, id) => m + (vol.get(id) ?? 0), 0), 0);
+      const vol = await this.seriesTotals(series, from, to, 0);
+      for (const g of ranked) g.volume = [...g.subsets.values()].reduce((n, sub) => n + sub.series.reduce((m, s) => m + (vol.get(s._id)?.count ?? 0), 0), 0);
       ranked = ranked.sort((a, b) => b.volume - a.volume).slice(0, METRIC_LIMITS.maxResultSeries);
     }
 
+    const needsBuckets = agg === 'p50' || agg === 'p90' || agg === 'p95' || agg === 'p99';
     const work = ranked.flatMap((g) => [...g.subsets].map(([bk, sub]) => ({ g, bk, sub })));
     let next = 0;
     await Promise.all(Array.from({ length: Math.min(6, work.length) }, async () => {
       for (;;) {
         const w = work[next++];
         if (!w) return;
-        const rows = await this.aggregateWindows(w.sub.ids, from, to, stepMs, { nBuckets: w.sub.bounds ? w.sub.bounds.length + 1 : 0, gauge: type === 'gauge', exemplars: type === 'histogram' });
+        // Bucket counts are only summed when a percentile will be read from them: count, sum, avg, rate, min and max never look at them.
+        const rows = await this.aggregateWindows(w.sub.series, from, to, stepMs, { nBuckets: w.sub.bounds && needsBuckets ? w.sub.bounds.length + 1 : 0, gauge: type === 'gauge', exemplars: type === 'histogram' });
         for (const r of rows) {
           let c = w.g.cells.get(r.t);
           if (!c) { c = { count: 0, sum: 0, min: null, max: null, last: null, lastAt: -1, buckets: new Map(), boundsBy: new Map() }; w.g.cells.set(r.t, c); }
@@ -341,7 +519,7 @@ export class MongoMetricStore implements MetricStore {
           if (r.min != null) c.min = c.min === null ? r.min : Math.min(c.min, r.min);
           if (r.max != null) c.max = c.max === null ? r.max : Math.max(c.max, r.max);
           if (r.last != null && r.lastAt >= c.lastAt) { c.last = r.last; c.lastAt = r.lastAt; }
-          if (w.sub.bounds) {
+          if (w.sub.bounds && needsBuckets) {
             const cur = c.buckets.get(w.bk);
             if (cur) { for (let i = 0; i < cur.length; i++) cur[i]! += r.buckets[i] ?? 0; } else { c.buckets.set(w.bk, [...r.buckets]); c.boundsBy.set(w.bk, w.sub.bounds); }
           }
@@ -367,7 +545,7 @@ export class MongoMetricStore implements MetricStore {
           if (c.buckets.size === 0) return null;
           if (c.buckets.size > 1) mixedLayouts = true;
           // Merge only histograms with identical bounds; with several layouts use the one holding most observations.
-          const [bk, counts] = [...c.buckets].sort((a, b) => b[1].reduce((x, y) => x + y, 0) - a[1].reduce((x, y) => x + y, 0))[0]!;
+          const [bk, counts] = [...c.buckets].sort((a, b) => b[1].reduce((x, y) => x + y, 0) - a[1].reduce((x, y) => x + y, 0) || (a[0] < b[0] ? -1 : 1))[0]!; // ties: by layout key, so the answer never depends on which chunk finished first
           const r = histogramQuantile(c.boundsBy.get(bk)!, counts, qv, { min: c.min, max: c.max });
           if (!r) return null;
           estimated = true; if (r.atLeast) floored = true;
@@ -394,7 +572,7 @@ export class MongoMetricStore implements MetricStore {
 
   // ================================================================== service overview (explicit HTTP server metrics)
   async httpOverview(scope: Scope, from: Date, to: Date): Promise<HttpOverview> {
-    const stepMs = this.stepFor(from, to);
+    const stepMs = this.overviewStep(from, to);
     const names = HTTP_DURATION_METRICS.map((m) => m.name);
     const series = await this.db.c.metricSeries.find({ orgId: scope.orgId, projectId: scope.projectId, environmentId: { $in: scope.environmentIds }, name: { $in: names }, type: 'histogram' })
       .limit(METRIC_LIMITS.maxSeriesScanned + 1).maxTimeMS(QUERY_TIMEOUT_MS).toArray();
@@ -402,8 +580,7 @@ export class MongoMetricStore implements MetricStore {
     if (series.length > METRIC_LIMITS.maxSeriesScanned) notes.push(`More than ${METRIC_LIMITS.maxSeriesScanned} HTTP series exist; the overview uses the first ${METRIC_LIMITS.maxSeriesScanned}.`);
     const use = series.slice(0, METRIC_LIMITS.maxSeriesScanned).filter((s) => !!s.service);
     if (!use.length) return { stepMs, services: [], notes };
-    const ids = use.map((s) => s._id);
-    await this.guardScan(ids, from, to);
+    await this.guardScan(this.plan(use, from, to, stepMs));
     const toMs = (s: MetricSeriesDoc) => (s.unit === 'ms' ? 1 : s.unit === 's' ? 1000 : HTTP_DURATION_METRICS.find((m) => m.name === s.name)!.toMs);
 
     interface Acc { requests: number; errors: number; buckets: Map<string, number[]>; bounds: Map<string, number[]>; scale: number }
@@ -417,19 +594,14 @@ export class MongoMetricStore implements MetricStore {
     };
     const p = (a: Acc, q: number): number | null => {
       if (!a.buckets.size) return null;
-      const [bk, counts] = [...a.buckets].sort((x, y) => y[1].reduce((s1, v) => s1 + v, 0) - x[1].reduce((s2, v) => s2 + v, 0))[0]!;
+      const [bk, counts] = [...a.buckets].sort((x, y) => y[1].reduce((s1, v) => s1 + v, 0) - x[1].reduce((s2, v) => s2 + v, 0) || (x[0] < y[0] ? -1 : 1))[0]!;
       const r = histogramQuantile(a.bounds.get(bk)!, counts, q);
       return r ? Math.round(r.value * a.scale * 1000) / 1000 : null;
     };
 
     // ---- 1. per-series totals, summed inside MongoDB: one row per series (hundreds), not one per stored minute (hundreds of thousands)
     const maxLen = Math.max(...use.map((s) => (s.bounds?.length ?? 0) + 1));
-    const bucketFields = Object.fromEntries(Array.from({ length: maxLen }, (_, i) => [`b${i}`, { $sum: { $ifNull: [{ $arrayElemAt: ['$buckets', i] }, 0] } }]));
-    const totals = await this.db.c.metricPoints.aggregate<Record<string, unknown> & { _id: string }>([
-      { $match: { seriesId: { $in: ids }, minute: { $gte: this.floor(from), $lte: to } } },
-      { $group: { _id: '$seriesId', count: { $sum: '$count' }, lastMin: { $max: '$minute' }, ...bucketFields } },
-    ], { maxTimeMS: QUERY_TIMEOUT_MS, allowDiskUse: true }).toArray();
-    const tot = new Map(totals.map((t) => [t._id, t]));
+    const tot = await this.seriesTotals(use, from, to, maxLen);
 
     const info = new Map<string, { s: MetricSeriesDoc; bk: string; isErr: boolean; cls: string; route: string }>();
     const bySvc = new Map<string, { metric: string; total: Acc; statuses: Record<string, number>; routes: Map<string, Acc>; timeline: Map<number, Acc>; last: number }>();
@@ -446,24 +618,23 @@ export class MongoMetricStore implements MetricStore {
       const e = bySvc.get(i.s.service!)!;
       if (i.s.name !== e.metric) continue;
       const t = tot.get(id)!;
-      const count = Number(t.count);
-      const buckets = i.s.bounds ? Array.from({ length: i.s.bounds.length + 1 }, (_, k) => Number(t[`b${k}`] ?? 0)) : null;
+      const count = t.count;
+      const buckets = i.s.bounds ? t.buckets.slice(0, i.s.bounds.length + 1) : null;
       addTo(e.total, count, buckets, i.bk, i.s.bounds, i.isErr);
       e.statuses[i.cls] = (e.statuses[i.cls] ?? 0) + count;
       let r = e.routes.get(i.route);
       if (!r) { r = newAcc(e.total.scale); e.routes.set(i.route, r); }
       addTo(r, count, buckets, i.bk, i.s.bounds, i.isErr);
-      const lm = t.lastMin instanceof Date ? t.lastMin.getTime() : 0;
-      if (count > 0 && lm > e.last) e.last = lm;
+      if (count > 0 && t.lastMin > e.last) e.last = t.lastMin;
     }
 
     // ---- 2. timeline per (service, metric, bucket layout): window rows summed inside MongoDB; 3. the 5xx subset for error counts
-    const subsets = new Map<string, { svc: string; ids: string[]; errIds: string[]; bounds: number[] | null; bk: string }>();
+    const subsets = new Map<string, { svc: string; series: MetricSeriesDoc[]; errSeries: MetricSeriesDoc[]; bounds: number[] | null; bk: string }>();
     for (const [id, i] of info) {
       if (i.s.name !== bySvc.get(i.s.service!)!.metric) continue;
       const key = `${i.s.service}\u0001${i.bk}`;
-      const sub = subsets.get(key) ?? { svc: i.s.service!, ids: [], errIds: [], bounds: i.s.bounds, bk: i.bk };
-      sub.ids.push(id); if (i.isErr) sub.errIds.push(id);
+      const sub = subsets.get(key) ?? { svc: i.s.service!, series: [], errSeries: [], bounds: i.s.bounds, bk: i.bk };
+      sub.series.push(i.s); if (i.isErr) sub.errSeries.push(i.s);
       subsets.set(key, sub);
     }
     const work = [...subsets.values()];
@@ -474,8 +645,8 @@ export class MongoMetricStore implements MetricStore {
         if (!w) return;
         const n = w.bounds ? w.bounds.length + 1 : 0;
         const [rows, errRows] = await Promise.all([
-          this.aggregateWindows(w.ids, from, to, stepMs, { nBuckets: n }),
-          w.errIds.length ? this.aggregateWindows(w.errIds, from, to, stepMs, { nBuckets: 0 }) : Promise.resolve([] as WindowRow[]),
+          this.aggregateWindows(w.series, from, to, stepMs, { nBuckets: n }),
+          w.errSeries.length ? this.aggregateWindows(w.errSeries, from, to, stepMs, { nBuckets: 0 }) : Promise.resolve([] as WindowRow[]),
         ]);
         const e = bySvc.get(w.svc)!;
         for (const r of rows) {
@@ -511,8 +682,8 @@ export class MongoMetricStore implements MetricStore {
     ]);
     let storageBytes: number | null = null;
     try {
-      const [a, b] = await Promise.all([this.db.db.command({ collStats: 'metric_points' }), this.db.db.command({ collStats: 'metric_series' })]);
-      storageBytes = Number(a.storageSize ?? 0) + Number(b.storageSize ?? 0); // whole collections, not per tenant: a platform-level figure
+      const [a, b, c] = await Promise.all([this.db.db.command({ collStats: 'metric_points' }), this.db.db.command({ collStats: 'metric_series' }), this.db.db.command({ collStats: 'metric_rollups' }).catch(() => ({ storageSize: 0 }))]);
+      storageBytes = Number(a.storageSize ?? 0) + Number(b.storageSize ?? 0) + Number(c.storageSize ?? 0); // whole collections, not per tenant: a platform-level figure
     } catch { /* not permitted for this user: omitted rather than faked */ }
     return {
       series, pointDocs, storageBytes, limits: { maxSeriesPerMetric: this.maxSeriesPerMetric, maxSeriesPerEnvironment: this.maxSeriesPerEnvironment },

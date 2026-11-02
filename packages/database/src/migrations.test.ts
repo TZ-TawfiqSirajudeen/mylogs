@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { migrateDownOne, migrateUp } from './migrations.js';
+import { migrateDownOne, migrateUp, migrations } from './migrations.js';
 import { freshTestDatabase, startTestMongo } from './testing.js';
 import type { Database } from './client.js';
 
@@ -37,6 +37,10 @@ test('rollback reverts the newest migration first; re-applying restores them in 
   expect(await names('logs')).toContain('logs_scope_ts_search');
   expect(await names('logs')).not.toContain('logs_scope_ts'); // v5 replaced it
   expect(await names('spans')).toContain('spans_scope_trace');
+  // migrations newer than v6 (alerting is v20, others may follow) are rolled back newest first, whatever their number
+  for (const v of migrations.map((m) => m.version).filter((x) => x > 6).sort((a, b) => b - a)) {
+    expect(await migrateDownOne(database.db)).toBe(v);
+  }
   expect(await migrateDownOne(database.db)).toBe(6);
   expect(await names('spans')).not.toContain('spans_scope_trace');
   expect(await migrateDownOne(database.db)).toBe(5);
@@ -55,7 +59,7 @@ test('rollback reverts the newest migration first; re-applying restores them in 
   expect(await migrateDownOne(database.db)).toBe(1);
   expect(await names('organizations')).not.toContain('org_slug_uq');
   expect(await migrateDownOne(database.db)).toBeNull(); // nothing left to roll back
-  expect(await migrateUp(database.db)).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(await migrateUp(database.db)).toEqual(migrations.map((m) => m.version));
   expect(await names('organizations')).toContain('org_slug_uq');
   expect(await names('logs')).toContain('logs_ttl');
 });
@@ -66,7 +70,7 @@ describe('migration lock', () => {
   test('concurrent runners queue: everything is applied exactly once and nobody crashes', async () => {
     const db = fresh();
     const results = await Promise.all([migrateUp(db), migrateUp(db), migrateUp(db)]);
-    expect(results.flat().sort()).toEqual([1, 2, 3, 4, 5, 6]); // each migration applied exactly once across all runners
+    expect(results.flat().sort((a, b) => a - b)).toEqual(migrations.map((m) => m.version).sort((a, b) => a - b)); // each migration applied exactly once across all runners
     expect(await db.collection('schema_migrations').countDocuments({ _id: 'migration-lock' as never })).toBe(0);
   });
 
@@ -81,7 +85,7 @@ describe('migration lock', () => {
   test('a stale lock from a crashed runner is taken over', async () => {
     const db = fresh();
     await db.collection('schema_migrations').insertOne({ _id: 'migration-lock' as never, lockedAt: new Date(Date.now() - 10 * 60_000), owner: 'dead' });
-    expect(await migrateUp(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await migrateUp(db)).toEqual(migrations.map((m) => m.version));
   });
 });
 
@@ -94,7 +98,7 @@ describe('v5 search-text backfill', () => {
       { _id: 'a' as never, ...base, message: 'Payment FAILED for Order 7', errorType: 'CardError', exceptionMessage: 'Declined' },
       { _id: 'b' as never, ...base, message: 'ok', errorType: null, exceptionMessage: null },
     ]);
-    expect(await migrateUp(db)).toEqual([5, 6]);
+    expect(await migrateUp(db)).toEqual(migrations.map((m) => m.version).filter((v) => v >= 5));
     const [a, b] = await Promise.all([db.collection('logs').findOne({ _id: 'a' as never }), db.collection('logs').findOne({ _id: 'b' as never })]);
     expect(a?.searchText).toBe('payment failed for order 7carderrordeclined');
     expect(b?.searchText).toBe('ok');

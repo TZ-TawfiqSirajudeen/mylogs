@@ -184,6 +184,25 @@ export const migrations: Migration[] = [
       ] as const) await db.collection(c).dropIndex(n).catch(() => undefined);
     },
   },
+  {
+    // Version numbers are not contiguous on purpose: parallel work streams reserve their own (20 = alerting, 30 = metric rollups); see ADR-0007.
+    version: 30,
+    name: 'metric-rollups',
+    async up(db) {
+      await db.createCollection('metric_rollups').catch(() => undefined);
+      const roll = db.collection('metric_rollups');
+      // One query shape: the series ids of a query, one tier, a bucket range.
+      await roll.createIndex({ seriesId: 1, tier: 1, minute: 1 }, { name: 'mroll_series_tier_minute' });
+      await roll.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'mroll_ttl' });
+      // The compactor finds work through the (small) set of series with unprocessed minutes; the index only holds series that have some.
+      await db.collection('metric_series').createIndex({ rollFrom: 1 }, { name: 'mseries_roll_pending', partialFilterExpression: { rollFrom: { $exists: true } } });
+    },
+    async down(db) {
+      await db.collection('metric_rollups').dropIndex('mroll_series_tier_minute').catch(() => undefined);
+      await db.collection('metric_rollups').dropIndex('mroll_ttl').catch(() => undefined);
+      await db.collection('metric_series').dropIndex('mseries_roll_pending').catch(() => undefined);
+    },
+  },
 ];
 
 const LOCK_ID = 'migration-lock';
