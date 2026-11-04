@@ -66,3 +66,17 @@ describe('alerting actions (ADR-0006)', () => {
     expect(canProject(resolveProjectAccess(p('member'), null), 'alert:read')).toBe(false);
   });
 });
+
+describe('deployment actions (ADR-0011)', () => {
+  const matrix = [
+    ['viewer', 'telemetry:read', true], ['viewer', 'deployment:write', false],
+    ['engineer', 'telemetry:read', true], ['engineer', 'deployment:write', true],
+    ['project_admin', 'telemetry:read', true], ['project_admin', 'deployment:write', true],
+  ] as const;
+  test.each(matrix)('%s %s -> %s', (role, action, expected) => expect(canProject({ role, environmentIds: null }, action)).toBe(expected));
+  test('an org auditor without a grant cannot read or write deployments; an org admin can write', () => {
+    expect(canProject(resolveProjectAccess(p('auditor'), null), 'telemetry:read')).toBe(false);
+    expect(canProject(resolveProjectAccess(p('auditor'), null), 'deployment:write')).toBe(false);
+    expect(canProject(resolveProjectAccess(p('admin'), null), 'deployment:write')).toBe(true);
+  });
+});

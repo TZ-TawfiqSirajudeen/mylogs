@@ -11,6 +11,7 @@ import Channels from './pages/alerts/Channels';
 import IncidentDetailPage from './pages/alerts/IncidentDetail';
 import Incidents from './pages/alerts/Incidents';
 import Audit from './pages/Audit';
+import Deployments from './pages/Deployments';
 import Login from './pages/Login';
 import Logs from './pages/Logs';
 import NotImplemented from './pages/NotImplemented';
@@ -60,6 +61,7 @@ createRoot(document.getElementById('root')!).render(
                 <Route path="alerts/channels" element={<Channels />} />
                 <Route path="incidents" element={<Incidents />} />
                 <Route path="incidents/:incidentId" element={<IncidentDetailPage />} />
+                <Route path="deployments" element={<Deployments />} />
                 <Route path="audit" element={<Audit />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="*" element={<NotImplemented />} />

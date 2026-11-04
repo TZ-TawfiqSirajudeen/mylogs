@@ -4,11 +4,11 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
-import { createAlertingServices, type WebhookSender } from '@nexus/alerting';
+import { createAlertingServices, RulePreviewService, type EmailSender, type SlackSender, type WebhookSender } from '@nexus/alerting';
 import { ConnectionService, ServiceError } from '@nexus/connections';
 import { createDefaultRegistry } from '@nexus/connectors';
 import type { Database } from '@nexus/database';
-import { IngestTokenService } from '@nexus/ingest';
+import { DeploymentService, IngestTokenService } from '@nexus/ingest';
 import { MongoLogStore } from '@nexus/logstore';
 import { MongoMetricStore, type MetricStore } from '@nexus/metricstore';
 import { MongoTraceStore, type TraceStore } from '@nexus/tracestore';
@@ -24,6 +24,7 @@ import { OidcService } from './auth/oidc.js';
 import { authRoutes } from './routes/auth.js';
 import { oidcRoutes } from './routes/oidc.js';
 import { alertingRoutes } from './routes/alerting.js';
+import { deploymentRoutes } from './routes/deployments.js';
 import { connectionRoutes } from './routes/connections.js';
 import { orgRoutes } from './routes/org.js';
 import { projectRoutes } from './routes/projects.js';
@@ -43,7 +44,7 @@ declare module 'fastify' {
   interface FastifyInstance { routeTable: RouteInfo[] }
 }
 
-export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyring; logStream?: { write(msg: string): void }; traceStore?: TraceStore; metricStore?: MetricStore; webhookSender?: WebhookSender } = {}) {
+export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyring; logStream?: { write(msg: string): void }; traceStore?: TraceStore; metricStore?: MetricStore; webhookSender?: WebhookSender; slackSender?: SlackSender; emailSender?: EmailSender } = {}) {
   const app = Fastify({
     logger: {
       level: cfg.logLevel,
@@ -108,7 +109,7 @@ export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyr
 
   if (cfg.env !== 'production') {
     await app.register(swagger, {
-      openapi: { info: { title: 'Nexus Observability API', version: '0.1.0' }, tags: [{ name: 'auth' }, { name: 'projects' }, { name: 'environments' }, { name: 'members' }, { name: 'audit' }, { name: 'connectors' }, { name: 'connections' }, { name: 'logs' }, { name: 'ingestion' }, { name: 'alerting' }, { name: 'incidents' }] },
+      openapi: { info: { title: 'Nexus Observability API', version: '0.1.0' }, tags: [{ name: 'auth' }, { name: 'projects' }, { name: 'environments' }, { name: 'members' }, { name: 'audit' }, { name: 'connectors' }, { name: 'connections' }, { name: 'logs' }, { name: 'ingestion' }, { name: 'alerting' }, { name: 'incidents' }, { name: 'deployments' }] },
       transform: jsonSchemaTransform,
     });
     await app.register(swaggerUi, { routePrefix: '/docs' });
@@ -150,7 +151,9 @@ export async function buildApp(cfg: Config, db: Database, deps: { keyring?: Keyr
   await app.register(observabilityRoutes({ db, traces: traceStore, metrics: metricStore, authorize, monitor, cookieName: app.cookieName }));
   await app.register(telemetryRoutes({ db, projects, store: logStore, tokens: new IngestTokenService(db, audit), audit, cookieName: app.cookieName, ingestPublicUrl: cfg.ingestPublicUrl }));
   await app.register(connectionRoutes({ projects, connections, registry, cookieName: app.cookieName }));
-  const alerting = createAlertingServices(db, audit, new SecretStore(db, keyring), cfg.network, { publicUrl: cfg.webOrigin, ...(deps.webhookSender ? { sender: deps.webhookSender } : {}) });
-  await app.register(alertingRoutes({ projects, alerting, cookieName: app.cookieName }));
+  const alerting = createAlertingServices(db, audit, new SecretStore(db, keyring), cfg.network, { publicUrl: cfg.webOrigin, ...(deps.webhookSender ? { sender: deps.webhookSender } : {}), ...(deps.slackSender ? { slackSender: deps.slackSender } : {}), ...(deps.emailSender ? { emailSender: deps.emailSender } : {}) });
+  await app.register(alertingRoutes({ projects, alerting, preview: new RulePreviewService({ metrics: metricStore, logs: logStore }), cookieName: app.cookieName }));
+  // Deployments / change markers (ADR-0011): CI writes with an ingestion token (scope `deployments`) or a session; everything else is read-only.
+  await app.register(deploymentRoutes({ db, projects, service: new DeploymentService(db, audit), tokens: new IngestTokenService(db, audit), authorize }));
   return app;
 }

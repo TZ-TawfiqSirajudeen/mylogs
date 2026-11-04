@@ -4,7 +4,7 @@ import { Badge, EmptyState } from '../ui';
 const PLAN: Record<string, [string, number]> = {
   '/services': ['Services', 4], '/traces': ['Traces', 4], '/metrics': ['Metrics', 4],
   '/dependencies': ['Dependency map', 7],
-  '/deployments': ['Deployments', 6], '/dashboards': ['Dashboards', 7], '/settings': ['Settings', 2],
+  '/dashboards': ['Dashboards', 7], '/settings': ['Settings', 2],
 };
 
 /** Honest placeholder: this module does not exist yet, so it shows no controls and no data. */

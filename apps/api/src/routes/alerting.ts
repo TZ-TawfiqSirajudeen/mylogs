@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import {
   AckBody, AlertRuleCreate, AlertRuleDto, AlertRuleUpdate, ChannelCreate, ChannelDto, ChannelParams, ChannelUpdate, CommentBody, DeliveryDto,
   IncidentDetailDto, IncidentDto, IncidentListQuery, IncidentParams, PageQuery, ProjectParam, ResolveBody, RuleListQuery, RuleParams, SilenceCreate,
-  SilenceDto, SilenceParams, TestSendResult, page,
+  SilenceDto, SilenceParams, TestSendResult, page, RulePreviewBody, RulePreviewResult, MaintenanceCreate, MaintenanceDto, MaintenanceParams, MaintenanceUpdate,
 } from '@nexus/contracts';
 import {
-  AlertingError, toChannelDto, toDeliveryDto, toEventDto, toIncidentDto, toRuleDto, toSilenceDto, type ActorScope, type AlertingServices,
+  AlertingError, type RulePreviewService, toChannelDto, toDeliveryDto, toEventDto, toIncidentDto, toRuleDto, toSilenceDto, toMaintenanceDto, type ActorScope, type AlertingServices,
 } from '@nexus/alerting';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -23,8 +23,8 @@ async function guard<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export function alertingRoutes(deps: { projects: ProjectService; alerting: AlertingServices; cookieName: string }) {
-  const { projects, alerting } = deps;
+export function alertingRoutes(deps: { projects: ProjectService; alerting: AlertingServices; preview: RulePreviewService; cookieName: string }) {
+  const { projects, alerting, preview } = deps;
 
   return async (app: FastifyInstance) => {
     const r = app.withTypeProvider<ZodTypeProvider>();
@@ -67,6 +67,19 @@ export function alertingRoutes(deps: { projects: ProjectService; alerting: Alert
       return reply.code(201).send(toRuleDto(await alerting.rules.create(s, req.body, ctx(req))));
     }));
 
+    // Registered before the `:ruleId` routes (a static segment wins in find-my-way anyway). Read-only: it never writes an incident, notification, lease or audit event.
+    r.post('/api/v1/projects/:projectId/alert-rules/preview', {
+      ...pre, config: { rateLimit: { ...throttled.rateLimit, max: 10 } },
+      schema: { tags: ['alerting'], summary: 'Preview a draft rule against the last 5 min to 24 h of stored data (project admin; read-only, bounded, rate-limited). Replays the real evaluator and state machine.', params: ProjectParam, body: RulePreviewBody, response: { 200: RulePreviewResult } },
+    }, async (req) => guard(async () => {
+      // Same authorization as creating the rule: alert:manage, and the rule's environment must be inside the caller's scope (404 otherwise).
+      const s = await scopeFor(req, req.params.projectId, MANAGE);
+      const allowed = s.environmentIds === null || s.environmentIds.includes(req.body.rule.environmentId);
+      const project = allowed ? await projects.get(principalOf(req), req.params.projectId) : null;
+      if (!project?.environments.some((e) => e.id === req.body.rule.environmentId)) throw new AppError(404, 'not_found', 'Environment not found');
+      return preview.preview({ orgId: s.orgId, projectId: s.projectId }, req.body);
+    }));
+
     r.get('/api/v1/projects/:projectId/alert-rules/:ruleId', {
       ...pre, schema: { tags: ['alerting'], params: RuleParams, response: { 200: AlertRuleDto } },
     }, async (req) => guard(async () => toRuleDto(await alerting.rules.get(await scopeFor(req, req.params.projectId, READ), req.params.ruleId))));
@@ -91,7 +104,7 @@ export function alertingRoutes(deps: { projects: ProjectService; alerting: Alert
     }));
 
     r.post('/api/v1/projects/:projectId/alert-channels', {
-      ...pre, schema: { tags: ['alerting'], summary: 'Create a webhook channel (project admin, unrestricted scope). The signing secret is write-only.', params: ProjectParam, body: ChannelCreate, response: { 201: ChannelDto } },
+      ...pre, schema: { tags: ['alerting'], summary: 'Create a webhook, Slack or e-mail channel (project admin, unrestricted scope). The webhook signing secret, Slack URL and SMTP credentials are write-only.', params: ProjectParam, body: ChannelCreate, response: { 201: ChannelDto } },
     }, async (req, reply) => guard(async () => {
       const s = await scopeFor(req, req.params.projectId, MANAGE);
       return reply.code(201).send(toChannelDto(await alerting.channels.create(s, req.body, ctx(req))));
@@ -109,7 +122,7 @@ export function alertingRoutes(deps: { projects: ProjectService; alerting: Alert
     }));
 
     r.post('/api/v1/projects/:projectId/alert-channels/:channelId/test', {
-      ...pre, config: throttled, schema: { tags: ['alerting'], summary: 'Send one signed test notification now (no retries; at most 5 per minute per channel)', params: ChannelParams, response: { 200: TestSendResult } },
+      ...pre, config: throttled, schema: { tags: ['alerting'], summary: 'Send one test notification now through the real transport of the channel (no retries; at most 5 per minute per channel)', params: ChannelParams, response: { 200: TestSendResult } },
     }, async (req) => guard(async () => {
       const t = await alerting.channels.test(await scopeFor(req, req.params.projectId, MANAGE), req.params.channelId, ctx(req));
       return { ok: t.ok, status: t.status, message: t.message, delivery: toDeliveryDto(t.delivery) };
@@ -135,6 +148,37 @@ export function alertingRoutes(deps: { projects: ProjectService; alerting: Alert
       ...pre, schema: { tags: ['alerting'], params: SilenceParams, response: { 204: z.null() } },
     }, async (req, reply) => guard(async () => {
       await alerting.silences.remove(await scopeFor(req, req.params.projectId, MANAGE), req.params.silenceId, ctx(req));
+      return reply.code(204).send(null);
+    }));
+
+    // ------------------------------------------------------------------ maintenance windows (ADR-0010)
+    r.get('/api/v1/projects/:projectId/alert-maintenance-windows', {
+      ...pre, schema: { tags: ['alerting'], summary: 'List maintenance windows with their computed state and next occurrence', params: ProjectParam, querystring: PageQuery, response: { 200: page(MaintenanceDto) } },
+    }, async (req) => guard(async () => {
+      const res = await alerting.maintenance.list(await scopeFor(req, req.params.projectId, READ), req.query);
+      const now = new Date();
+      return { items: res.items.map((x) => toMaintenanceDto(x, now)), nextCursor: res.nextCursor };
+    }));
+
+    r.post('/api/v1/projects/:projectId/alert-maintenance-windows', {
+      ...pre, schema: { tags: ['alerting'], summary: 'Create a one-off or weekly (IANA time zone, daylight-saving aware) maintenance window: matching notifications are suppressed, incidents are still recorded (project admin, unrestricted scope)', params: ProjectParam, body: MaintenanceCreate, response: { 201: MaintenanceDto } },
+    }, async (req, reply) => guard(async () => {
+      const s = await scopeFor(req, req.params.projectId, MANAGE);
+      return reply.code(201).send(toMaintenanceDto(await alerting.maintenance.create(s, req.body, ctx(req)), new Date()));
+    }));
+
+    r.get('/api/v1/projects/:projectId/alert-maintenance-windows/:windowId', {
+      ...pre, schema: { tags: ['alerting'], params: MaintenanceParams, response: { 200: MaintenanceDto } },
+    }, async (req) => guard(async () => toMaintenanceDto(await alerting.maintenance.get(await scopeFor(req, req.params.projectId, READ), req.params.windowId), new Date())));
+
+    r.patch('/api/v1/projects/:projectId/alert-maintenance-windows/:windowId', {
+      ...pre, schema: { tags: ['alerting'], summary: 'Update a maintenance window (409 on a concurrent edit or duplicate name)', params: MaintenanceParams, body: MaintenanceUpdate, response: { 200: MaintenanceDto } },
+    }, async (req) => guard(async () => toMaintenanceDto(await alerting.maintenance.update(await scopeFor(req, req.params.projectId, MANAGE), req.params.windowId, req.body, ctx(req)), new Date())));
+
+    r.delete('/api/v1/projects/:projectId/alert-maintenance-windows/:windowId', {
+      ...pre, schema: { tags: ['alerting'], params: MaintenanceParams, response: { 204: z.null() } },
+    }, async (req, reply) => guard(async () => {
+      await alerting.maintenance.remove(await scopeFor(req, req.params.projectId, MANAGE), req.params.windowId, ctx(req));
       return reply.code(204).send(null);
     }));
 

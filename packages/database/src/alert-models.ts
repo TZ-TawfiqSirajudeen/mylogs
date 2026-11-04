@@ -46,13 +46,21 @@ export interface AlertRuleDoc {
   noDataSince: Date | null;
   groups: AlertGroupState[];
   truncatedGroups: boolean;
+  /** Replay policy (ADR-0010). Optional on stored documents: absent = `skip` / 5 / 900 s. */
+  missedPolicy?: 'skip' | 'replay';
+  maxReplayEvaluations?: number;
+  staleNotificationSeconds?: number;
+  /** Evaluations that were due but not run on time, cumulative: `replayed` were re-evaluated in order, `skipped` were only counted. */
+  missed?: { total: number; replayed: number; skipped: number; lastAt: Date | null };
 }
 
 export interface AlertChannelDoc {
   _id: string; kind: 'channel'; orgId: string; projectId: string;
-  type: 'webhook'; name: string; nameLower: string; enabled: boolean;
-  /** scheme://host[:port] only. The full URL and the signing secret are in `secrets` (envelope-encrypted), never here. */
+  type: 'webhook' | 'slack' | 'email'; name: string; nameLower: string; enabled: boolean;
+  /** scheme://host[:port] only. The full URL, signing secret, SMTP user name and password are in `secrets` (envelope-encrypted), never here. */
   urlDisplay: string;
+  /** E-mail channels only (ADR-0008). Recipients and the from-address are not secrets; the API masks the recipients for readers. */
+  email?: { host: string; port: number; security: 'starttls' | 'tls' | 'none'; from: string; recipients: string[]; hasCredentials: boolean };
   rateLimitPerMinute: number;
   lastTest: { at: Date; ok: boolean; message: string } | null;
   createdBy: string; createdAt: Date; updatedAt: Date;
@@ -67,7 +75,23 @@ export interface AlertSilenceDoc {
   expireAt: Date;
 }
 
-export type AlertConfigDoc = AlertRuleDoc | AlertChannelDoc | AlertSilenceDoc;
+export type MaintenanceScheduleDoc =
+  | { type: 'once'; startsAt: Date; endsAt: Date }
+  | { type: 'weekly'; timezone: string; weekdays: ('mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun')[]; startTime: string; durationMinutes: number };
+
+/** A maintenance window (ADR-0010): like a silence, but recurring (weekly, IANA time zone) or one-off. Same matchers as a silence. */
+export interface AlertMaintenanceDoc {
+  _id: string; kind: 'maintenance'; orgId: string; projectId: string;
+  name: string; nameLower: string; comment: string; enabled: boolean;
+  schedule: MaintenanceScheduleDoc;
+  matchers: { ruleIds?: string[]; severities?: AlertSeverityName[]; environmentIds?: string[] };
+  version: number;
+  createdBy: string; createdAt: Date; updatedAt: Date;
+  /** Only one-off windows expire (end + 1 day); recurring ones stay until deleted. */
+  expireAt?: Date;
+}
+
+export type AlertConfigDoc = AlertRuleDoc | AlertChannelDoc | AlertSilenceDoc | AlertMaintenanceDoc;
 
 export type IncidentEventKind =
   | 'opened' | 'notified' | 'notification_failed' | 'notification_suppressed' | 'acknowledged' | 'resolved' | 'auto_resolved' | 'comment';
@@ -98,11 +122,13 @@ export interface IncidentDoc {
 export interface AlertDeliveryDoc {
   _id: string; orgId: string; projectId: string; incidentId: string | null; channelId: string; channelName: string;
   event: 'incident.opened' | 'incident.resolved' | 'test';
-  status: 'pending' | 'delivered' | 'failed' | 'suppressed' | 'rate_limited';
+  status: 'pending' | 'delivered' | 'failed' | 'suppressed' | 'rate_limited' | 'stale';
   attempts: number; nextAttemptAt: Date | null;
   lease: { owner: string; until: Date } | null;
   lastError: { code: string; message: string } | null; httpStatus: number | null;
   silenceId: string | null;
+  /** Set when a maintenance window suppressed the notification (ADR-0010). Absent on older rows. */
+  maintenanceId?: string | null;
   /** The notification body as of enqueue time (bounded, contains no secrets). */
   payload: Record<string, unknown>;
   createdAt: Date; deliveredAt: Date | null; expireAt: Date;

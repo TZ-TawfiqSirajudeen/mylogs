@@ -8,6 +8,7 @@ import { freshnessBadge, lastSeen, msText, pctText, sourceBadge } from './Servic
 import { logsLink, traceLink, tracesLink } from './traces/model';
 import { fieldClass, ProjectGate, WINDOWS } from './traces/shared';
 import { formatNs } from './traces/waterfall-model';
+import { useDeploymentMarkers } from './deployments/useMarkers';
 import { utc } from './logs/model';
 
 interface Detail { health: ServiceHealth[]; slowTraces: TraceSummaryDto[]; errorTraces: TraceSummaryDto[]; correlation: string }
@@ -46,6 +47,10 @@ function Body({ projectId, service, envNames }: { projectId: string; service: st
     queryFn: () => api<Detail>('GET', `/api/v1/projects/${projectId}/services/${encodeURIComponent(service)}?minutes=${minutes}${env ? `&environmentId=${env}` : ''}`),
   });
 
+  // Change markers (deployments, ADR-0011) for the selected window, rounded to the minute so the request is stable between renders.
+  const minuteNow = Math.floor(Date.now() / 60_000) * 60_000;
+  const deploys = useDeploymentMarkers(projectId, new Date(minuteNow - minutes * 60_000).toISOString(), new Date(minuteNow).toISOString(), { service, environmentId: env ?? undefined });
+
   if (q.isPending) return <Loading label="Loading service…" />;
   if (q.isError) {
     return (
@@ -73,6 +78,7 @@ function Body({ projectId, service, envNames }: { projectId: string; service: st
       {rows.map((s) => {
         const seen = lastSeen(s);
         const stepMs = s.timeline.length > 1 ? s.timeline[1]!.t - s.timeline[0]!.t : 60_000;
+        const envMarkers = deploys.forEnvironment(s.environmentId);
         const toTraces = (t: number, errorsOnly: boolean) => nav(tracesLink(projectId, { service, from: new Date(t).toISOString(), to: new Date(t + stepMs).toISOString(), errorsOnly, envId: s.environmentId }));
         return (
           <section key={s.environmentId} aria-label={`${service} in ${envNames.get(s.environmentId) ?? s.environmentId}`} className="space-y-3" data-testid="service-health">
@@ -83,6 +89,7 @@ function Body({ projectId, service, envNames }: { projectId: string; service: st
             </div>
             {s.freshness === 'stale' && <p role="note" className="rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">No telemetry has been received from this service recently. The numbers below describe the past; they say nothing about its health right now.</p>}
             <p className="text-xs text-slate-600 dark:text-slate-400" data-testid="source-detail">{s.sourceDetail}</p>
+            {deploys.failed && <p role="note" data-testid="markers-unavailable" className="text-xs text-slate-600 dark:text-slate-400">Deployment markers could not be loaded; the charts are complete without them.</p>}
 
             {s.source === 'none' ? (
               <EmptyState title="No request statistics available">This service has not sent HTTP server metrics or server spans in this window, so rate, errors and latency cannot be shown. It is not shown as zero.</EmptyState>
@@ -96,12 +103,12 @@ function Body({ projectId, service, envNames }: { projectId: string; service: st
                   <TimelineChart title="Requests and errors per window" unit="requests" stepMs={stepMs}
                     summary={`${s.requests ?? 0} requests, ${s.errors ?? 0} errors in the selected window.`}
                     series={[{ name: 'Requests', kind: 'bar', tone: 'indigo', points: s.timeline.map((p) => ({ t: p.t, v: p.requests })) }, { name: 'Errors', kind: 'bar', tone: 'red', points: s.timeline.map((p) => ({ t: p.t, v: p.errors })) }]}
-                    onPointClick={(t) => toTraces(t, true)} />
+                    onPointClick={(t) => toTraces(t, true)} markers={envMarkers} />
                   <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">Selecting a bar opens the traces recorded in that window. This is a time-window link, not proof that those traces caused what the chart shows{s.source === 'traces' ? '' : ' (and only sampled traces exist)'}.</p>
                 </Card>
                 {s.source === 'metrics' && (
                   <Card title="Latency"><TimelineChart title="p95 latency per window" unit="ms" stepMs={stepMs} summary={`Overall p95 ${msText(s.p95Ms)}.`}
-                    series={[{ name: 'p95', kind: 'line', tone: 'amber', points: s.timeline.map((p) => ({ t: p.t, v: p.p95Ms })) }]} onPointClick={(t) => toTraces(t, false)} />
+                    series={[{ name: 'p95', kind: 'line', tone: 'amber', points: s.timeline.map((p) => ({ t: p.t, v: p.p95Ms })) }]} onPointClick={(t) => toTraces(t, false)} markers={envMarkers} />
                     <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">Percentiles are estimated from histogram buckets of the merged distribution (never averaged across instances).</p></Card>
                 )}
                 {s.source === 'metrics' && (

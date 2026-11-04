@@ -5,3 +5,4 @@ export * from './stats.js';
 export * from './signal-pipeline.js';
 export * from './trace-pipeline.js';
 export * from './metric-pipeline.js';
+export * from './deployments/index.js';

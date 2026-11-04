@@ -67,7 +67,7 @@ function Body({ project }: { project: NonNullable<ReturnType<typeof import('../.
 
       {editing && (
         <Card title={editing === 'new' ? 'New alert rule' : `Edit “${editing.name}”`}>
-          <RuleForm key={editing === 'new' ? 'new' : editing.id} rule={editing === 'new' ? null : editing} envs={project.environments} channels={channels.data?.items ?? []}
+          <RuleForm key={editing === 'new' ? 'new' : editing.id} projectId={project.id} rule={editing === 'new' ? null : editing} envs={project.environments} channels={channels.data?.items ?? []}
             busy={save.isPending} error={formError} onSubmit={submit} onCancel={() => { setEditing(null); setFormError(null); }} />
         </Card>
       )}
@@ -96,7 +96,13 @@ function Body({ project }: { project: NonNullable<ReturnType<typeof import('../.
                   {r.noDataSince && <span className="block text-xs text-slate-600 dark:text-slate-400">no data since {fmtTime(r.noDataSince)}</span>}
                 </td>
                 <td className="px-3 py-2 tabular-nums">{num(r.lastValue)}</td>
-                <td className="px-3 py-2 font-mono text-xs">{fmtTime(r.lastEvaluatedAt)}</td>
+                <td className="px-3 py-2 font-mono text-xs" data-testid="rule-evaluated">{fmtTime(r.lastEvaluatedAt)}
+                  {r.missedPolicy === 'replay' && <span className="block font-sans text-slate-600 dark:text-slate-400">replays missed checks (up to {r.maxReplayEvaluations})</span>}
+                  {r.missedEvaluations.total > 0 && (
+                    <span className="block font-sans text-slate-600 dark:text-slate-400" data-testid="rule-missed">
+                      {r.missedEvaluations.total} missed ({r.missedEvaluations.replayed} replayed, {r.missedEvaluations.skipped} skipped){r.missedEvaluations.lastAt ? `, last ${fmtTime(r.missedEvaluations.lastAt)}` : ''}
+                    </span>)}
+                </td>
                 <td className="px-3 py-2 text-right">
                   <div className="flex flex-wrap justify-end gap-1">
                     {r.status === 'firing' && <Link className="rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700" to={`/incidents?p=${project.id}&ruleId=${r.id}&status=active`}>Incidents</Link>}

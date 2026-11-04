@@ -97,13 +97,13 @@ test.describe('projects and environments', () => {
 
   test('unimplemented modules say so and offer no controls or numbers', async ({ page }) => {
     await login(page, DEMO.owner);
-    for (const [path, phase] of [['/dependencies', 7], ['/deployments', 6], ['/dashboards', 7]] as const) {
+    for (const [path, phase] of [['/dependencies', 7], ['/dashboards', 7]] as const) {
       await page.goto(path);
       await expect(page.getByText('Not implemented yet')).toBeVisible();
       await expect(page.getByText(`phase ${phase}`)).toBeVisible();
     }
-    // Incidents and alerts exist now (alerting, ADR-0006): they must not claim to be unimplemented.
-    for (const path of ['/incidents', '/alerts']) {
+    // Incidents, alerts (ADR-0006) and deployments (ADR-0011) exist now: they must not claim to be unimplemented.
+    for (const path of ['/incidents', '/alerts', '/deployments']) { // deployments exist since ADR-0011 (specs/22 covers them in depth)
       await page.goto(path);
       await expect(page.locator('main h1').first()).toBeVisible();
       await expect(page.getByText('Not implemented yet')).toHaveCount(0);

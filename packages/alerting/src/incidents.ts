@@ -4,7 +4,7 @@ import type { AlertDeliveryDoc, AlertRuleDoc, AuditSink, Database, IncidentDoc, 
 import {
   type ActorScope, AlertingError, conflict, DAY_MS, decodeCursor, encodeCursor, envFilter, isDuplicateKey, notFound, type RequestContext, RETENTION,
 } from './common.js';
-import { Notifier, type DeliveryEvent } from './notifier.js';
+import { Notifier, type DeliveryEvent, type PlanContext } from './notifier.js';
 import { describeOp, formatDuration } from './state.js';
 
 const SYSTEM_CTX: RequestContext = { requestId: 'alert-engine' };
@@ -14,6 +14,14 @@ export const incidentTitle = (ruleName: string, labels: Record<string, string>) 
   const l = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(', ');
   return l ? `${ruleName} (${l})` : ruleName;
 };
+
+/**
+ * Present when an evaluation is a REPLAY of a missed interval boundary (ADR-0010): the `now`/`at` passed alongside is the boundary (event time), `processedAt`
+ * is the real time. Notifications are created at `processedAt`; transitions older than `staleAfterSeconds` are recorded as stale and not sent.
+ */
+export interface ReplayInfo { processedAt: Date; staleAfterSeconds: number }
+const replayData = (at: Date, r: ReplayInfo | undefined): IncidentEventDoc['data'] => (r ? { replayed: true, evaluatedAt: at.toISOString(), processedAt: r.processedAt.toISOString() } : {});
+const planContext = (at: Date, r: ReplayInfo | undefined): PlanContext => (r ? { eventAt: at, replayed: true, staleAfterSeconds: r.staleAfterSeconds } : {});
 
 type RuleForIncident = Pick<AlertRuleDoc, '_id' | 'orgId' | 'projectId' | 'environmentId' | 'name' | 'severity' | 'condition' | 'windowSeconds' | 'channelIds'>;
 
@@ -40,7 +48,7 @@ export class IncidentService {
    * Opens the incident for (rule, group), or returns the one that is already live. Deduplication is enforced by the database (unique partial
    * index on rule + group where `active`), so two workers racing on the same rule can never create two live incidents.
    */
-  async open(rule: RuleForIncident, group: { key: string; labels: Record<string, string> }, value: number | null, now: Date): Promise<{ incident: IncidentDoc; created: boolean }> {
+  async open(rule: RuleForIncident, group: { key: string; labels: Record<string, string> }, value: number | null, now: Date, replay?: ReplayInfo): Promise<{ incident: IncidentDoc; created: boolean }> {
     const incident: IncidentDoc = {
       _id: randomUUID(), orgId: rule.orgId, projectId: rule.projectId, environmentId: rule.environmentId, ruleId: rule._id, ruleName: rule.name, severity: rule.severity,
       title: incidentTitle(rule.name, group.labels), groupKey: group.key, groupLabels: group.labels,
@@ -50,9 +58,9 @@ export class IncidentService {
     };
     const opened = this.event('opened', now, value === null
       ? `Opened: no data for ${formatDuration(rule.windowSeconds)} (the rule treats missing data as a breach)`
-      : `Opened: value ${fmt(value)} is ${describeOp(rule.condition.op)} ${fmt(rule.condition.threshold)} over ${formatDuration(rule.windowSeconds)}`, null, { value });
+      : `Opened: value ${fmt(value)} is ${describeOp(rule.condition.op)} ${fmt(rule.condition.threshold)} over ${formatDuration(rule.windowSeconds)}`, null, { value, ...replayData(now, replay) });
     try {
-      const plan = await this.notifier.plan(rule, incident, 'incident.opened', now);
+      const plan = await this.notifier.plan(rule, incident, 'incident.opened', replay?.processedAt ?? now, planContext(now, replay));
       incident.timeline = [opened, ...plan.events];
       incident.eventCount = incident.timeline.length;
       await this.db.transaction(async (session) => {
@@ -70,11 +78,11 @@ export class IncidentService {
   }
 
   /** Closes a live incident automatically (recovery, or its rule was disabled/changed/deleted). Idempotent: returns null when nothing was live. */
-  async autoResolve(ruleRef: { orgId: string; projectId: string; ruleId: string; groupKey: string }, reason: string, now: Date, value: number | null = null): Promise<IncidentDoc | null> {
+  async autoResolve(ruleRef: { orgId: string; projectId: string; ruleId: string; groupKey: string }, reason: string, now: Date, value: number | null = null, replay?: ReplayInfo): Promise<IncidentDoc | null> {
     const message = reason === 'recovered'
       ? `Resolved automatically: the condition stayed clear${value === null ? '' : ` (value ${fmt(value)})`}`
       : `Resolved automatically: ${reason.replace(/_/g, ' ')}`;
-    return this.close({ orgId: ruleRef.orgId, projectId: ruleRef.projectId, ruleId: ruleRef.ruleId, groupKey: ruleRef.groupKey }, { kind: 'auto', userId: null, reason }, 'auto_resolved', message, now, null, SYSTEM_CTX, value);
+    return this.close({ orgId: ruleRef.orgId, projectId: ruleRef.projectId, ruleId: ruleRef.ruleId, groupKey: ruleRef.groupKey }, { kind: 'auto', userId: null, reason }, 'auto_resolved', message, now, null, SYSTEM_CTX, value, replay);
   }
 
   async autoResolveAllForRule(orgId: string, projectId: string, ruleId: string, reason: string, now: Date): Promise<number> {
@@ -82,6 +90,26 @@ export class IncidentService {
     let n = 0;
     for (const i of live) if (await this.autoResolve({ orgId, projectId, ruleId, groupKey: i.groupKey }, reason, now)) n++;
     return n;
+  }
+
+  /**
+   * After a replay (ADR-0010 #12): ONE notice about the CURRENT state of an incident whose own notification was recorded as stale. `incident.opened` for an incident
+   * that is still live, `incident.resolved` for one that was announced and has since closed. Idempotent: does nothing when a non-stale delivery of that event
+   * already exists, so the worst case after any outage is one notice per incident.
+   */
+  async notifyCatchUp(rule: Pick<AlertRuleDoc, '_id' | 'orgId' | 'projectId' | 'environmentId' | 'severity' | 'channelIds'>, incidentId: string, event: Exclude<DeliveryEvent, 'test'>, now: Date): Promise<boolean> {
+    const incident = await this.db.c.incidents.findOne({ _id: incidentId, orgId: rule.orgId, projectId: rule.projectId });
+    if (!incident || (event === 'incident.opened') !== incident.active) return false;
+    const handled = await this.db.c.alertDeliveries.countDocuments({ orgId: rule.orgId, projectId: rule.projectId, incidentId, event, status: { $ne: 'stale' } });
+    if (handled > 0) return false;
+    const plan = await this.notifier.plan(rule, incident, event, now);
+    if (plan.deliveries.length === 0) return false;
+    const deliveries = plan.deliveries.map((d) => ({ ...d, payload: { ...d.payload, catchUp: true } }));
+    await this.db.transaction(async (session) => {
+      await this.db.c.alertDeliveries.insertMany(deliveries as AlertDeliveryDoc[], { session });
+      if (plan.events.length) await this.db.c.incidents.updateOne({ _id: incidentId }, this.pushEvents(plan.events), { session });
+    });
+    return true;
   }
 
   /** The ids of incidents that are live for a rule (used by the engine to notice a manual resolution). */
@@ -97,7 +125,7 @@ export class IncidentService {
 
   private async close(
     filter: Record<string, unknown>, resolvedBy: NonNullable<IncidentDoc['resolvedBy']>, type: 'resolved' | 'auto_resolved', message: string,
-    now: Date, actor: string | null, ctx: RequestContext, value: number | null,
+    now: Date, actor: string | null, ctx: RequestContext, value: number | null, replay?: ReplayInfo,
   ): Promise<IncidentDoc | null> {
     return this.db.transaction(async (session) => {
       const closed = await this.db.c.incidents.findOneAndUpdate(
@@ -106,8 +134,8 @@ export class IncidentService {
         { returnDocument: 'after', session },
       );
       if (!closed) return null;
-      const plan = await this.notifier.plan({ _id: closed.ruleId, orgId: closed.orgId, projectId: closed.projectId, environmentId: closed.environmentId, severity: closed.severity, channelIds: [] }, closed, 'incident.resolved', now);
-      const events = [this.event(type, now, message, actor, { reason: resolvedBy.reason }), ...plan.events];
+      const plan = await this.notifier.plan({ _id: closed.ruleId, orgId: closed.orgId, projectId: closed.projectId, environmentId: closed.environmentId, severity: closed.severity, channelIds: [] }, closed, 'incident.resolved', replay?.processedAt ?? now, planContext(now, replay));
+      const events = [this.event(type, now, message, actor, { reason: resolvedBy.reason, ...replayData(now, replay) }), ...plan.events];
       await this.db.c.incidents.updateOne({ _id: closed._id }, this.pushEvents(events), { session });
       if (plan.deliveries.length) await this.db.c.alertDeliveries.insertMany(plan.deliveries as AlertDeliveryDoc[], { session });
       await this.audit.record({

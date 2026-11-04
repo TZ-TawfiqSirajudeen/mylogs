@@ -1,6 +1,7 @@
-import { ALERT_LIMITS, RULE_METRIC_AGGREGATIONS, SEVERITIES, type AlertRuleCreate } from '@nexus/contracts';
+import { ALERT_LIMITS, REPLAY_LIMITS, RULE_METRIC_AGGREGATIONS, SEVERITIES, type AlertRuleCreate } from '@nexus/contracts';
 import { useState } from 'react';
 import { Button } from '../../ui';
+import { PreviewPanel } from './PreviewPanel';
 import { field, OPS, type Channel, type Rule } from './shared';
 
 interface Env { id: string; name: string; isProduction: boolean }
@@ -13,8 +14,9 @@ const linesToFilters = (text: string) => text.split('\n').map((l) => l.trim()).f
 const mins = (s: number) => String(Math.round((s / 60) * 100) / 100);
 
 /** Create / edit form for one alert rule. All input limits mirror the server's (which is the authority and re-validates everything). */
-export function RuleForm({ rule, envs, channels, busy, error, onSubmit, onCancel }: {
-  rule: Rule | null; envs: Env[]; channels: Channel[]; busy: boolean; error: string | null;
+export function RuleForm({ rule, envs, channels, busy, error, onSubmit, onCancel, projectId }: {
+  /** Needed for the history preview (admins only reach this form). */
+  projectId?: string; rule: Rule | null; envs: Env[]; channels: Channel[]; busy: boolean; error: string | null;
   onSubmit: (body: AlertRuleCreate) => void; onCancel: () => void;
 }) {
   const q = rule?.query;
@@ -45,9 +47,13 @@ export function RuleForm({ rule, envs, channels, busy, error, onSubmit, onCancel
   const [interval, setIntervalSeconds] = useState(rule?.intervalSeconds ?? 60);
   const [channelIds, setChannelIds] = useState<string[]>(rule?.channelIds ?? []);
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
+  // missed evaluations (ADR-0010)
+  const [missedPolicy, setMissedPolicy] = useState<Rule['missedPolicy']>(rule?.missedPolicy ?? 'skip');
+  const [maxReplay, setMaxReplay] = useState(String(rule?.maxReplayEvaluations ?? 5));
+  const [staleMin, setStaleMin] = useState(mins(rule?.staleNotificationSeconds ?? 900));
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
+  /** The rule exactly as Save would send it (also what Preview replays). */
+  const build = (): AlertRuleCreate => {
     const query = kind === 'metric'
       ? { kind: 'metric' as const, metric: metric.trim(), agg, filters: linesToFilters(labels), groupBy: groupBy.trim() ? [groupBy.trim()] : [], ...(service.trim() ? { service: service.trim() } : {}) }
       : {
@@ -55,12 +61,14 @@ export function RuleForm({ rule, envs, channels, busy, error, onSubmit, onCancel
         ...(text.trim() ? { text: text.trim() } : {}), ...(errorsOnly ? { errorsOnly: true } : minSeverity ? { minSeverity: minSeverity as (typeof SEVERITIES)[number] } : {}),
         ...(services.trim() ? { services: services.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
       };
-    onSubmit({
+    return {
       name: name.trim(), description: description.trim(), severity, environmentId, enabled, query, condition: { op, threshold: Number(threshold) },
       windowSeconds: Math.round(Number(windowMin) * 60), forSeconds: Math.round(Number(forMin) * 60), resolveAfterSeconds: Math.round(Number(resolveMin) * 60),
       noDataPolicy: noData, intervalSeconds: interval, channelIds,
-    } as AlertRuleCreate);
+      missedPolicy, maxReplayEvaluations: Math.round(Number(maxReplay)), staleNotificationSeconds: Math.round(Number(staleMin) * 60),
+    } as AlertRuleCreate;
   };
+  const submit = (e: React.FormEvent) => { e.preventDefault(); onSubmit(build()); };
 
   return (
     <form onSubmit={submit} className="space-y-4" data-testid="rule-form" aria-label={rule ? `Edit rule ${rule.name}` : 'New alert rule'}>
@@ -116,6 +124,19 @@ export function RuleForm({ rule, envs, channels, busy, error, onSubmit, onCancel
           <label className="text-sm md:col-span-2">When there is no data<select className={`${field} mt-0.5 block w-full`} value={noData} onChange={(e) => setNoData(e.target.value as Rule['noDataPolicy'])} data-testid="rule-nodata">
             {NO_DATA.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
         </div>
+      </fieldset>
+
+      {projectId && <PreviewPanel projectId={projectId} build={build} disabledReason={!environmentId ? 'Choose an environment to preview this rule.' : null} />}
+
+      <fieldset className="space-y-2 rounded-md border border-slate-200 p-3 dark:border-slate-800" data-testid="rule-missed-policy">
+        <legend className="px-1 text-sm font-medium">If checks are missed (worker down)</legend>
+        <div className="grid gap-3 md:grid-cols-3">
+          <label className="text-sm">Policy<select className={`${field} mt-0.5 block w-full`} value={missedPolicy} onChange={(e) => setMissedPolicy(e.target.value as Rule['missedPolicy'])} data-testid="rule-missed-policy-select">
+            <option value="skip">Skip: judge the current data only (default)</option><option value="replay">Replay: re-check the latest missed intervals in order</option></select></label>
+          <label className="text-sm">Replay at most (checks, 1–{REPLAY_LIMITS.maxEvaluations})<input type="number" min={1} max={REPLAY_LIMITS.maxEvaluations} disabled={missedPolicy !== 'replay'} className={`${field} mt-0.5 block w-full`} value={maxReplay} onChange={(e) => setMaxReplay(e.target.value)} data-testid="rule-max-replay" /></label>
+          <label className="text-sm">Do not notify for events older than (minutes)<input type="number" min={0} max={REPLAY_LIMITS.maxStaleSeconds / 60} step="any" disabled={missedPolicy !== 'replay'} className={`${field} mt-0.5 block w-full`} value={staleMin} onChange={(e) => setStaleMin(e.target.value)} data-testid="rule-stale-minutes" /></label>
+        </div>
+        <p className="text-xs text-slate-600 dark:text-slate-400">Replay uses the data as it was at each missed check, so an incident opens at the time it really began. Older replayed events are recorded as <em>stale</em> and not sent; an incident that is still firing gets one catch-up notice.</p>
       </fieldset>
 
       <fieldset className="rounded-md border border-slate-200 p-3 dark:border-slate-800">

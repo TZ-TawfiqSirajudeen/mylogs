@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  ALERT_LIMITS, validateRuleFields, type AlertRuleCreate, type AlertRuleDto, type AlertRuleUpdate, type ChannelDto, type DeliveryDto, type RuleQuery, type SilenceDto,
+  ALERT_LIMITS, REPLAY_LIMITS, validateRuleFields, type AlertRuleCreate, type AlertRuleDto, type AlertRuleUpdate, type ChannelDto, type DeliveryDto, type RuleQuery, type SilenceDto,
 } from '@nexus/contracts';
 import type { AlertChannelDoc, AlertDeliveryDoc, AlertRuleDoc, AlertSilenceDoc, AuditSink, ClientSession, Database } from '@nexus/database';
 import { SecretStore } from '@nexus/secrets';
@@ -13,11 +13,11 @@ import { checkWebhookTarget, displayUrl, WebhookUrlError } from './webhook.js';
 const iso = (d: Date) => d.toISOString();
 
 /** Atomically takes one slot of a per-project quota inside the caller's transaction (aborts, rolling everything back, when the quota is used up). */
-async function takeSlot(db: Database, key: string, max: number, what: string, session: ClientSession) {
+export async function takeSlot(db: Database, key: string, max: number, what: string, session: ClientSession) {
   const c = await db.c.counters.findOneAndUpdate({ _id: key }, { $inc: { value: 1 } }, { upsert: true, returnDocument: 'after', session });
   if (c!.value > max) throw new AlertingError(422, 'limit_reached', `A project may have at most ${max} ${what}`);
 }
-const releaseSlot = (db: Database, key: string, session: ClientSession) => db.c.counters.updateOne({ _id: key }, { $inc: { value: -1 } }, { session });
+export const releaseSlot = (db: Database, key: string, session: ClientSession) => db.c.counters.updateOne({ _id: key }, { $inc: { value: -1 } }, { session });
 const rulesKey = (s: { orgId: string; projectId: string }) => `alerting:rules:${s.orgId}:${s.projectId}`;
 const channelsKey = (s: { orgId: string; projectId: string }) => `alerting:channels:${s.orgId}:${s.projectId}`;
 
@@ -32,6 +32,9 @@ export function toRuleDto(r: AlertRuleDoc): AlertRuleDto {
     health: r.health, status: live ?? (r.lastEvaluatedAt ? 'ok' : 'unknown'), lastEvaluatedAt: r.lastEvaluatedAt ? iso(r.lastEvaluatedAt) : null,
     nextEvalAt: r.nextEvalAt ? iso(r.nextEvalAt) : null, lastError: r.lastError ? { at: iso(r.lastError.at), message: r.lastError.message } : null,
     lastValue: r.lastValue, noDataSince: r.noDataSince ? iso(r.noDataSince) : null,
+    missedPolicy: r.missedPolicy ?? 'skip', maxReplayEvaluations: r.maxReplayEvaluations ?? REPLAY_LIMITS.defaultMaxEvaluations,
+    staleNotificationSeconds: r.staleNotificationSeconds ?? REPLAY_LIMITS.defaultStaleSeconds,
+    missedEvaluations: { total: r.missed?.total ?? 0, replayed: r.missed?.replayed ?? 0, skipped: r.missed?.skipped ?? 0, lastAt: r.missed?.lastAt ? iso(r.missed.lastAt) : null },
     groups: r.groups.map((g) => ({ key: g.key, labels: g.labels, status: g.status, since: iso(g.since), lastValue: g.lastValue, incidentId: g.incidentId })),
     truncatedGroups: r.truncatedGroups, createdBy: r.createdBy, createdAt: iso(r.createdAt), updatedAt: iso(r.updatedAt),
   };
@@ -70,6 +73,8 @@ export class RuleService {
       resolveAfterSeconds: input.resolveAfterSeconds, noDataPolicy: input.noDataPolicy, intervalSeconds: input.intervalSeconds, channelIds: input.channelIds,
       version: 1, createdBy: s.userId, createdAt: now, updatedAt: now, nextEvalAt: input.enabled ? now : null, lease: null,
       lastEvaluatedAt: null, health: 'unknown', lastError: null, lastValue: null, noDataSince: null, groups: [], truncatedGroups: false,
+      missedPolicy: input.missedPolicy, maxReplayEvaluations: input.maxReplayEvaluations, staleNotificationSeconds: input.staleNotificationSeconds,
+      missed: { total: 0, replayed: 0, skipped: 0, lastAt: null },
     };
     try {
       await this.db.transaction(async (session) => {
@@ -158,133 +163,13 @@ export class RuleService {
 
 // ======================================================================= channels
 
-export function toChannelDto(c: AlertChannelDoc): ChannelDto {
-  return {
-    id: c._id, projectId: c.projectId, type: c.type, name: c.name, enabled: c.enabled, urlDisplay: c.urlDisplay, hasSigningSecret: true, rateLimitPerMinute: c.rateLimitPerMinute,
-    lastTest: c.lastTest ? { at: iso(c.lastTest.at), ok: c.lastTest.ok, message: c.lastTest.message } : null, createdBy: c.createdBy, createdAt: iso(c.createdAt), updatedAt: iso(c.updatedAt),
-  };
-}
 export const toDeliveryDto = (d: AlertDeliveryDoc): DeliveryDto => ({
   id: d._id, incidentId: d.incidentId, channelId: d.channelId, channelName: d.channelName, event: d.event, status: d.status, attempts: d.attempts,
   createdAt: iso(d.createdAt), deliveredAt: d.deliveredAt ? iso(d.deliveredAt) : null, nextAttemptAt: d.nextAttemptAt ? iso(d.nextAttemptAt) : null,
-  lastError: d.lastError, httpStatus: d.httpStatus, silenceId: d.silenceId,
+  lastError: d.lastError, httpStatus: d.httpStatus, silenceId: d.silenceId, maintenanceId: d.maintenanceId ?? null,
 });
 
-export class ChannelService {
-  constructor(
-    private readonly db: Database, private readonly audit: AuditSink, private readonly secrets: SecretStore, private readonly policy: NetworkPolicy,
-    private readonly delivery: DeliveryProcessor, private readonly opts: { now?: () => Date } = {},
-  ) {}
-  private now() { return this.opts.now?.() ?? new Date(); }
-  /** Channels are project-level: an environment-restricted caller may not manage (or learn the configuration of) them. */
-  private requireProjectWide(s: ActorScope) { if (s.environmentIds !== null) throw forbiddenScope(); }
-  private scoped(s: ActorScope, id: string) { return { kind: 'channel' as const, _id: id, orgId: s.orgId, projectId: s.projectId }; }
-
-  private async checkUrl(url: string) {
-    try { return (await checkWebhookTarget(url, this.policy)).url; } catch (e) {
-      if (e instanceof WebhookUrlError) throw invalid(e.message);
-      throw e;
-    }
-  }
-
-  async create(s: ActorScope, input: { name: string; url: string; signingSecret: string; enabled: boolean; rateLimitPerMinute: number }, ctx: RequestContext): Promise<AlertChannelDoc> {
-    this.requireProjectWide(s);
-    const url = await this.checkUrl(input.url);
-    const now = this.now();
-    const doc: AlertChannelDoc = {
-      _id: randomUUID(), kind: 'channel', orgId: s.orgId, projectId: s.projectId, type: 'webhook', name: input.name, nameLower: input.name.toLowerCase(), enabled: input.enabled,
-      urlDisplay: displayUrl(url), rateLimitPerMinute: input.rateLimitPerMinute, lastTest: null, createdBy: s.userId, createdAt: now, updatedAt: now,
-    };
-    try {
-      await this.db.transaction(async (session) => {
-        await takeSlot(this.db, channelsKey(s), ALERT_LIMITS.maxChannelsPerProject, 'notification channels', session);
-        await channelCol(this.db).insertOne(doc, { session });
-        const owner = channelSecretOwner(doc._id);
-        await this.secrets.put({ orgId: s.orgId, connectionId: owner, name: 'url' }, input.url, s.userId, session);
-        await this.secrets.put({ orgId: s.orgId, connectionId: owner, name: 'signing' }, input.signingSecret, s.userId, session);
-        await this.audit.record({ orgId: s.orgId, actorUserId: s.userId, action: 'alert.channel.created', targetType: 'alert_channel', targetId: doc._id, projectId: s.projectId, metadata: { name: doc.name, type: doc.type, target: doc.urlDisplay } }, ctx, session);
-      });
-    } catch (e) {
-      if (isDuplicateKey(e)) throw conflict(`A channel named "${input.name}" already exists in this project`);
-      throw e;
-    }
-    return doc;
-  }
-
-  async list(s: ActorScope, q: { limit: number; cursor?: string | undefined }) {
-    const filter: Record<string, unknown> = { kind: 'channel', orgId: s.orgId, projectId: s.projectId };
-    const c = decodeCursor(q.cursor);
-    if (c) filter.$or = [{ createdAt: { $lt: c[0] } }, { createdAt: c[0], _id: { $lt: c[1] } }];
-    const rows = await channelCol(this.db).find(filter as never).sort({ createdAt: -1, _id: -1 }).limit(q.limit + 1).toArray();
-    const page = rows.slice(0, q.limit);
-    const last = page[page.length - 1];
-    return { items: page, nextCursor: rows.length > q.limit && last ? encodeCursor(last.createdAt.getTime(), last._id) : null };
-  }
-
-  async get(s: ActorScope, id: string): Promise<AlertChannelDoc> {
-    const c = await channelCol(this.db).findOne(this.scoped(s, id));
-    if (!c) throw notFound('Notification channel');
-    return c;
-  }
-
-  async update(s: ActorScope, id: string, patch: { name?: string; url?: string; signingSecret?: string; enabled?: boolean; rateLimitPerMinute?: number }, ctx: RequestContext): Promise<AlertChannelDoc> {
-    this.requireProjectWide(s);
-    await this.get(s, id);
-    const set: Record<string, unknown> = { updatedAt: this.now() };
-    if (patch.name !== undefined) Object.assign(set, { name: patch.name, nameLower: patch.name.toLowerCase() });
-    if (patch.enabled !== undefined) set.enabled = patch.enabled;
-    if (patch.rateLimitPerMinute !== undefined) set.rateLimitPerMinute = patch.rateLimitPerMinute;
-    if (patch.url !== undefined) { set.urlDisplay = displayUrl(await this.checkUrl(patch.url)); set.lastTest = null; }
-    try {
-      await this.db.transaction(async (session) => {
-        await channelCol(this.db).updateOne(this.scoped(s, id), { $set: set }, { session });
-        const owner = channelSecretOwner(id);
-        if (patch.url !== undefined) await this.secrets.put({ orgId: s.orgId, connectionId: owner, name: 'url' }, patch.url, s.userId, session);
-        if (patch.signingSecret !== undefined) await this.secrets.put({ orgId: s.orgId, connectionId: owner, name: 'signing' }, patch.signingSecret, s.userId, session);
-        // Field NAMES only: values (and certainly secrets) never reach the audit trail.
-        await this.audit.record({ orgId: s.orgId, actorUserId: s.userId, action: 'alert.channel.updated', targetType: 'alert_channel', targetId: id, projectId: s.projectId, metadata: { fields: Object.keys(patch) } }, ctx, session);
-      });
-    } catch (e) {
-      if (isDuplicateKey(e)) throw conflict(`A channel named "${patch.name}" already exists in this project`);
-      throw e;
-    }
-    return this.get(s, id);
-  }
-
-  async remove(s: ActorScope, id: string, ctx: RequestContext): Promise<void> {
-    this.requireProjectWide(s);
-    const cur = await this.get(s, id);
-    await this.db.transaction(async (session) => {
-      await channelCol(this.db).deleteOne(this.scoped(s, id), { session });
-      await this.secrets.deleteAllForConnection(s.orgId, channelSecretOwner(id), session);
-      await ruleCol(this.db).updateMany({ kind: 'rule', orgId: s.orgId, projectId: s.projectId, channelIds: id }, { $pull: { channelIds: id } }, { session });
-      await releaseSlot(this.db, channelsKey(s), session);
-      await this.audit.record({ orgId: s.orgId, actorUserId: s.userId, action: 'alert.channel.deleted', targetType: 'alert_channel', targetId: id, projectId: s.projectId, metadata: { name: cur.name } }, ctx, session);
-    });
-  }
-
-  /** Sends one signed test notification right now (no retries) and records it in the delivery log. Limited to a few per minute per channel. */
-  async test(s: ActorScope, id: string, ctx: RequestContext): Promise<{ ok: boolean; status: number | null; message: string; delivery: AlertDeliveryDoc }> {
-    this.requireProjectWide(s);
-    const ch = await this.get(s, id);
-    const now = this.now();
-    const recent = await this.db.c.alertDeliveries.countDocuments({ orgId: s.orgId, projectId: s.projectId, channelId: id, event: 'test', createdAt: { $gte: new Date(now.getTime() - 60_000) } });
-    if (recent >= 5) throw new AlertingError(429, 'rate_limited', 'At most 5 test notifications per minute per channel');
-    const d: AlertDeliveryDoc = {
-      _id: randomUUID(), orgId: s.orgId, projectId: s.projectId, incidentId: null, channelId: id, channelName: ch.name, event: 'test', status: 'pending', attempts: 0, nextAttemptAt: null,
-      lease: null, lastError: null, httpStatus: null, silenceId: null,
-      payload: { event: 'test', occurredAt: now.toISOString(), message: 'This is a test notification from Nexus Observability.', channel: ch.name },
-      createdAt: now, deliveredAt: null, expireAt: new Date(now.getTime() + RETENTION.deliveryDays * DAY_MS),
-    };
-    await this.db.c.alertDeliveries.insertOne(d);
-    const done = await this.delivery.attempt(d, 1);
-    const ok = done.status === 'delivered';
-    const message = ok ? `Delivered (HTTP ${done.httpStatus})` : done.lastError?.message ?? 'Failed';
-    await channelCol(this.db).updateOne(this.scoped(s, id), { $set: { lastTest: { at: now, ok, message } } });
-    await this.audit.record({ orgId: s.orgId, actorUserId: s.userId, action: 'alert.channel.tested', targetType: 'alert_channel', targetId: id, projectId: s.projectId, metadata: { ok } }, ctx);
-    return { ok, status: done.httpStatus, message, delivery: done };
-  }
-}
+// ChannelService and toChannelDto live in ./channels.ts (ADR-0008).
 
 // ======================================================================= silences
 

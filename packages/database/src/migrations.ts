@@ -237,6 +237,25 @@ export const migrations: Migration[] = [
       await db.collection('metric_series').dropIndex('mseries_roll_pending').catch(() => undefined);
     },
   },
+  {
+    // Version 32 is reserved for deployments (ADR-0011); 31 belongs to another work stream. Order in the array is what matters.
+    version: 32,
+    name: 'deployments',
+    async up(db) {
+      await db.createCollection('deployments').catch(() => undefined);
+      const dep = db.collection('deployments');
+      // List, marker window and the 24 h write counter: scope, then newest first. `_id` makes the keyset cursor total.
+      await dep.createIndex({ orgId: 1, projectId: 1, environmentId: 1, startedAt: -1, _id: -1 }, { name: 'dep_scope_started' });
+      // Service filter and incident correlation.
+      await dep.createIndex({ orgId: 1, projectId: 1, environmentId: 1, service: 1, startedAt: -1, _id: -1 }, { name: 'dep_scope_service_started' });
+      // Idempotency: one deployment per (tenant, environment, key). Only records that carry a key take part.
+      await dep.createIndex({ orgId: 1, environmentId: 1, idempotencyKey: 1 }, { name: 'dep_idem_uq', unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
+      await dep.createIndex({ expireAt: 1 }, { name: 'dep_ttl', expireAfterSeconds: 0 });
+    },
+    async down(db) {
+      for (const n of ['dep_scope_started', 'dep_scope_service_started', 'dep_idem_uq', 'dep_ttl']) await db.collection('deployments').dropIndex(n).catch(() => undefined);
+    },
+  },
 ];
 
 const LOCK_ID = 'migration-lock';

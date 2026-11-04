@@ -30,7 +30,7 @@ describe('channels: secrets', () => {
     const w = await makeWorld(mongo.uri);
     const ch = await channel(w);
     // the API-facing shape
-    const { toChannelDto } = await import('./config.js');
+    const { toChannelDto } = await import('./channels.js');
     const dto = toChannelDto(ch);
     const wire = JSON.stringify(dto);
     expect(wire).not.toContain(SECRET); expect(wire).not.toContain('XXXXTOKENXXXX'); expect(wire).not.toContain('/services/');

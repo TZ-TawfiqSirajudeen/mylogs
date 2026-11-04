@@ -5,6 +5,8 @@ import { api } from '../../api';
 import { Badge, Button, Card, ErrorState, Loading } from '../../ui';
 import { fmtTime } from '../sources/parts';
 import { ProjectGate } from '../traces/shared';
+import { IncidentDeploymentEvents } from './IncidentDeployments';
+import { RelatedPanel } from './RelatedPanel';
 import { AlertTabs, can, duration, field, IncidentStatusBadge, link, num, OPS, SeverityBadge, Table, THead, type Delivery, type IncidentDetail } from './shared';
 
 export default function IncidentDetailPage() {
@@ -74,8 +76,11 @@ function Body({ project, incidentId }: { project: NonNullable<ReturnType<typeof 
       {!act && <p className="text-sm text-slate-600 dark:text-slate-400" data-testid="incident-readonly">You have read-only access. Engineers and project admins can acknowledge, resolve and comment.</p>}
       {error && <p role="alert" className="text-sm text-red-700 dark:text-red-400" data-testid="incident-error">{error}</p>}
 
+      <RelatedPanel projectId={project.id} incident={i} />
+
       <Card title="Timeline">
         <ol className="space-y-3" data-testid="incident-timeline" aria-label="Incident timeline">
+          <IncidentDeploymentEvents projectId={project.id} incidentId={incidentId} openedAt={i.openedAt} />
           {i.timeline.map((e) => (
             <li key={e.id} className="border-l-2 border-slate-300 pl-3 dark:border-slate-700" data-testid={`timeline-${e.type}`}>
               <div className="flex flex-wrap items-center gap-2 text-sm"><span className="font-medium">{EVENT_LABEL[e.type] ?? e.type}</span>

@@ -1,4 +1,6 @@
 import { useId, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { markerIndex, STATUS_STYLE, type ChartMarker } from './chart-markers';
 
 /**
  * Small, dependency-free SVG charts. Design rules:
@@ -26,11 +28,15 @@ export function niceMax(v: number): number {
 export const fmtNum = (n: number | null, digits = 2): string => (n === null ? 'no data' : Math.abs(n) >= 1000 ? n.toLocaleString('en', { maximumFractionDigits: 0 }) : String(Number(n.toFixed(digits))));
 const clock = (t: number, stepMs: number) => { const d = new Date(t); return stepMs >= 86_400_000 ? d.toISOString().slice(5, 10) : d.toISOString().slice(11, 16); };
 
-export function TimelineChart({ title, unit, series, stepMs, summary, onPointClick }: {
+export function TimelineChart({ title, unit, series, stepMs, summary, onPointClick, markers }: {
   title: string; unit: string; series: ChartSeries[]; stepMs: number; summary?: string; onPointClick?: (t: number) => void;
+  /** Change markers (deployments, ADR-0011): vertical, focusable, with a tooltip; listed as text below the chart. */
+  markers?: ChartMarker[];
 }) {
   const id = useId();
+  const nav = useNavigate();
   const [table, setTable] = useState(false);
+  const [tip, setTip] = useState<string | null>(null);
   const all = series.flatMap((s) => s.points);
   const ts = [...new Set(all.map((p) => p.t))].sort((a, b) => a - b);
   const hasData = all.some((p) => p.v !== null);
@@ -40,6 +46,9 @@ export function TimelineChart({ title, unit, series, stepMs, summary, onPointCli
   const y = (v: number) => PAD.t + ih - (v / max) * ih;
   const bw = Math.max(2, Math.min(24, (iw / Math.max(ts.length, 1)) * 0.7));
   const idx = new Map(ts.map((t, i) => [t, i]));
+  const xf = (pos: number) => PAD.l + (ts.length <= 1 ? iw / 2 : (pos / (ts.length - 1)) * iw);
+  const drawnMarkers = (markers ?? []).flatMap((m) => { const pos = markerIndex(m.t, ts, stepMs); return pos === null ? [] : [{ m, x: xf(pos) }]; });
+  const tipMarker = drawnMarkers.find((d) => d.m.id === tip);
   const label = `${title}. ${summary ?? (hasData ? `${series.map((s) => s.name).join(', ')} over ${ts.length} windows.` : 'No data in this window.')}`;
 
   return (
@@ -55,7 +64,8 @@ export function TimelineChart({ title, unit, series, stepMs, summary, onPointCli
       {!hasData ? (
         <p role="status" className="flex h-24 items-center justify-center rounded border border-dashed border-slate-300 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-400">No measurements in this window (missing data is not shown as zero).</p>
       ) : (
-        <svg role="img" aria-label={label} viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="none" style={{ height: 'auto', maxHeight: 220 }}>
+        <div className="relative">
+        <svg role="img" aria-label={label} viewBox={`0 0 ${W} ${H}`} className="block w-full" preserveAspectRatio="none" style={{ height: 'auto', maxHeight: 220 }}>
           {[0, 0.5, 1].map((f) => (
             <g key={f}>
               <line x1={PAD.l} x2={W - PAD.r} y1={y(max * f)} y2={y(max * f)} className="stroke-slate-200 dark:stroke-slate-800" strokeWidth={1} />
@@ -91,6 +101,43 @@ export function TimelineChart({ title, unit, series, stepMs, summary, onPointCli
             );
           })}
         </svg>
+        {drawnMarkers.length > 0 && (
+          // A second layer, not children of the role="img" chart: an image's children are presentational, and a focusable control inside one is an accessibility defect.
+          <svg role="group" aria-label="Deployment markers" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" style={{ overflow: 'visible' }}>
+            {drawnMarkers.map(({ m, x: mx }) => {
+              const st = STATUS_STYLE[m.status];
+              return (
+              <g key={m.id} role="button" tabIndex={0} aria-label={`Deployment: ${m.label}${m.href ? '. Press Enter to open.' : ''}`} aria-describedby={tip === m.id ? `${id}-tip` : undefined} data-testid="chart-marker" data-marker-status={m.status}
+                  className={`group pointer-events-auto outline-none ${m.href ? 'cursor-pointer' : ''}`}
+                  onFocus={() => setTip(m.id)} onBlur={() => setTip((v) => (v === m.id ? null : v))} onMouseEnter={() => setTip(m.id)} onMouseLeave={() => setTip((v) => (v === m.id ? null : v))}
+                  onClick={m.href ? () => nav(m.href!) : undefined}
+                  onKeyDown={(e) => { if (e.key === 'Escape') setTip(null); else if ((e.key === 'Enter' || e.key === ' ') && m.href) { e.preventDefault(); nav(m.href); } }}>
+                  <title>{m.label}</title>
+                  <rect x={mx - 7} y={PAD.t} width={14} height={ih} className="fill-transparent" />
+                  <line x1={mx} x2={mx} y1={PAD.t} y2={PAD.t + ih} strokeWidth={1.5} strokeDasharray={st.dash} className={TONE[st.tone].stroke} />
+                  <polygon points={`${mx - 5},${PAD.t} ${mx + 5},${PAD.t} ${mx},${PAD.t + 8}`} className={`${TONE[st.tone].fill} ${TONE[st.tone].stroke}`} strokeWidth={1} />
+                  <rect x={mx - 8} y={PAD.t - 2} width={16} height={ih + 4} rx={2} fill="none" strokeWidth={2} className="hidden stroke-slate-900 group-focus-visible:block dark:stroke-white" />
+                </g>
+              );
+            })}
+          </svg>
+        )}
+        </div>
+      )}
+      {tipMarker && (
+        <div id={`${id}-tip`} role="tooltip" data-testid="marker-tooltip" className="pointer-events-none relative z-10 -mt-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs shadow dark:border-slate-600 dark:bg-slate-900"
+          style={{ marginLeft: `${Math.min(70, Math.max(0, (tipMarker.x / W) * 100 - 15))}%`, width: 'fit-content', maxWidth: '90%' }}>
+          {STATUS_STYLE[tipMarker.m.status].glyph} {tipMarker.m.label}
+        </div>
+      )}
+      {drawnMarkers.length > 0 && (
+        <ul aria-label="Deployments in this window" data-testid="chart-deployments" className="flex flex-col gap-0.5 text-xs">
+          {drawnMarkers.slice(-12).map(({ m }) => (
+            <li key={m.id}><span aria-hidden className="mr-1">{STATUS_STYLE[m.status].glyph}</span>{m.href ? <a className="text-indigo-700 underline dark:text-indigo-300" href={m.href} onClick={(e) => { e.preventDefault(); nav(m.href!); }}>{m.label}</a> : m.label}</li>
+          ))}
+          {drawnMarkers.length > 12 && <li className="text-slate-600 dark:text-slate-400">and {drawnMarkers.length - 12} earlier deployments in this window (see Deployments)</li>}
+          <li className="text-slate-600 dark:text-slate-400">A deployment marker shows when a change was recorded. It does not show that the change caused anything on this chart.</li>
+        </ul>
       )}
       <button type="button" aria-expanded={table} aria-controls={`${id}-tbl`} className="text-xs text-indigo-700 underline dark:text-indigo-300" onClick={() => setTable((v) => !v)}>
         {table ? 'Hide data table' : 'Show data as a table'}

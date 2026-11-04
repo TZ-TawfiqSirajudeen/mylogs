@@ -1,5 +1,6 @@
 import type { Collection, Db } from 'mongodb';
 import type { AlertConfigDoc, AlertDeliveryDoc, IncidentDoc } from './alert-models.js';
+import type { DeploymentDoc } from './deployment-models.js';
 
 export type OrgRole = 'owner' | 'admin' | 'member' | 'auditor';
 export type ProjectRole = 'project_admin' | 'engineer' | 'viewer';
@@ -104,6 +105,8 @@ export interface ConnectionDoc {
 
 export type TelemetrySignal = 'logs' | 'traces' | 'metrics';
 export const ALL_SIGNALS: TelemetrySignal[] = ['logs', 'traces', 'metrics'];
+/** What an ingestion token may do: send one of the telemetry signals, or record deployments (ADR-0011, opt-in, never part of ALL_SIGNALS). */
+export type IngestTokenScope = TelemetrySignal | 'deployments';
 
 export interface IngestTokenDoc {
   _id: string; orgId: string; projectId: string; environmentId: string;
@@ -111,7 +114,7 @@ export interface IngestTokenDoc {
   /** First characters of the token, shown in the UI to tell tokens apart. The token itself is never stored, only its hash. */
   prefix: string; tokenHash: string;
   /** Which signals this token may send. Tokens created before phase 4 are logs-only and are NOT widened implicitly. */
-  scopes: TelemetrySignal[];
+  scopes: IngestTokenScope[];
   retentionDays: number;
   redaction: { enabled: boolean; extraKeys: string[] };
   /** Per-token override of the platform default rate limit; null = default. */
@@ -302,6 +305,8 @@ export interface Collections {
   alertConfig: Collection<AlertConfigDoc>;
   incidents: Collection<IncidentDoc>;
   alertDeliveries: Collection<AlertDeliveryDoc>;
+  /** Deployments / change markers (ADR-0011). */
+  deployments: Collection<DeploymentDoc>;
 }
 
 export function collections(db: Db): Collections {
@@ -332,5 +337,6 @@ export function collections(db: Db): Collections {
     alertConfig: db.collection('alert_config'),
     incidents: db.collection('incidents'),
     alertDeliveries: db.collection('alert_deliveries'),
+    deployments: db.collection('deployments'),
   };
 }

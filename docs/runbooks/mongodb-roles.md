@@ -16,7 +16,7 @@ db.createRole({
     "sessions", "counters", "secrets", "connections", "schema_migrations",
     "ingest_tokens", "logs", "ingest_stats", "saved_queries", "query_history", "auth_flows",
     "spans", "trace_summaries", "metric_series", "metric_points", "metric_rollups", "services",
-    "alert_config", "incidents", "alert_deliveries"
+    "alert_config", "incidents", "alert_deliveries", "deployments"
   ].map(c => ({
     resource: { db: "nexus", collection: c },
     actions: ["find", "insert", "update", "remove", "createIndex", "createCollection", "dropIndex"]

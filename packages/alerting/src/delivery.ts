@@ -4,7 +4,10 @@ import { SecretStore } from '@nexus/secrets';
 import type { NetworkPolicy } from '@nexus/security';
 import { ALERT_LIMITS } from '@nexus/contracts';
 import { channelCol, channelSecretOwner } from './common.js';
-import { sendWebhook, type WebhookResult, type WebhookSender } from './webhook.js';
+import { buildEmailMessage, EmailFormatError } from './email.js';
+import { sendSmtp, type EmailSender } from './smtp.js';
+import { slackBody } from './slack.js';
+import { fail, sendSlack, sendWebhook, type SlackSender, type WebhookResult, type WebhookSender } from './webhook.js';
 
 export interface DeliveryOptions {
   owner: string;
@@ -15,6 +18,9 @@ export interface DeliveryOptions {
   /** Delay before attempt number `attempt + 1` (attempt = attempts already made, >= 1). Exponential with jitter by default. */
   backoffMs?: (attempt: number) => number;
   sender?: WebhookSender;
+  /** Transports of the other channel types (ADR-0008); injectable for tests. */
+  slackSender?: SlackSender;
+  emailSender?: EmailSender;
   concurrency?: number;
   batch?: number;
   leaseMs?: number;
@@ -40,12 +46,16 @@ export class DeliveryProcessor {
   private readonly secrets: SecretStore;
   private readonly now: () => Date;
   private readonly send: WebhookSender;
+  private readonly sendSlackMessage: SlackSender;
+  private readonly sendEmail: EmailSender;
   private readonly maxAttempts: number;
 
   constructor(private readonly db: Database, secrets: SecretStore, private readonly o: DeliveryOptions) {
     this.secrets = secrets;
     this.now = o.now ?? (() => new Date());
     this.send = o.sender ?? sendWebhook;
+    this.sendSlackMessage = o.slackSender ?? sendSlack;
+    this.sendEmail = o.emailSender ?? sendSmtp;
     this.maxAttempts = o.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   }
 
@@ -87,12 +97,30 @@ export class DeliveryProcessor {
         result = { ok: false, httpStatus: null, code: 'invalid_url', message: 'The channel no longer exists or is disabled', retryable: false };
       } else {
         const owner = channelSecretOwner(channel._id);
-        const [url, secret] = await Promise.all([
-          this.secrets.get({ orgId: d.orgId, connectionId: owner, name: 'url' }),
-          this.secrets.get({ orgId: d.orgId, connectionId: owner, name: 'signing' }),
-        ]);
-        const body = JSON.stringify({ ...d.payload, deliveryId: d._id, attempt: attempts });
-        result = await this.send({ url, secret, event: d.event, deliveryId: d._id, body, now }, { policy: this.o.policy });
+        const get = (name: string) => this.secrets.get({ orgId: d.orgId, connectionId: owner, name });
+        const opts = { policy: this.o.policy };
+        if (channel.type === 'slack') {
+          const url = await get('url');
+          result = await this.sendSlackMessage({ url, event: d.event, deliveryId: d._id, body: slackBody(d.payload), now }, opts);
+        } else if (channel.type === 'email') {
+          const e = channel.email;
+          if (!e) {
+            result = fail('invalid_address', 'The e-mail channel has no SMTP settings', false);
+          } else {
+            const [username, password] = e.hasCredentials ? await Promise.all([get('smtp-user'), get('smtp-pass')]) : [undefined, undefined];
+            try {
+              const { raw } = buildEmailMessage({ from: e.from, to: e.recipients, deliveryId: d._id, event: d.event, now }, d.payload);
+              result = await this.sendEmail({ host: e.host, port: e.port, security: e.security, username, password, from: e.from, to: e.recipients, message: raw }, opts);
+            } catch (err) {
+              if (!(err instanceof EmailFormatError)) throw err;
+              result = fail('invalid_address', err.message, false);
+            }
+          }
+        } else {
+          const [url, secret] = await Promise.all([get('url'), get('signing')]);
+          const body = JSON.stringify({ ...d.payload, deliveryId: d._id, attempt: attempts });
+          result = await this.send({ url, secret, event: d.event, deliveryId: d._id, body, now }, opts);
+        }
       }
     } catch {
       // Decryption or storage problems: never surface details (they could name keys); the operator sees the worker log.
@@ -104,7 +132,7 @@ export class DeliveryProcessor {
     if (result.ok) {
       this.metrics.delivered++;
       patch = { status: 'delivered', attempts, deliveredAt: now, nextAttemptAt: null, lease: null, lastError: null, httpStatus: result.httpStatus };
-      timeline = { id: randomUUID(), type: 'notified', at: now, actorUserId: null, message: `Notified "${d.channelName}" (${d.event === 'incident.opened' ? 'opened' : 'resolved'}, HTTP ${result.httpStatus})`, data: { channelId: d.channelId, deliveryId: d._id, event: d.event, attempts } };
+      timeline = { id: randomUUID(), type: 'notified', at: now, actorUserId: null, message: `Notified "${d.channelName}" (${d.event === 'incident.opened' ? 'opened' : d.event === 'test' ? 'test' : 'resolved'}, ${result.httpStatus === null ? 'accepted' : `HTTP ${result.httpStatus}`})`, data: { channelId: d.channelId, deliveryId: d._id, event: d.event, attempts } };
     } else if (result.retryable && attempts < maxAttempts) {
       this.metrics.retried++;
       const delay = (this.o.backoffMs ?? defaultBackoffMs)(attempts);

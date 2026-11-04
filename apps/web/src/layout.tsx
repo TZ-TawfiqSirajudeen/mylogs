@@ -14,7 +14,7 @@ const NAV: NavItem[] = [
   { to: '/dependencies', label: 'Dependencies', phase: 7 },
   { to: '/incidents', label: 'Incidents' },
   { to: '/alerts', label: 'Alerts' },
-  { to: '/deployments', label: 'Deployments', phase: 6 },
+  { to: '/deployments', label: 'Deployments' },
   { to: '/sources', label: 'Data Sources' },
   { to: '/dashboards', label: 'Dashboards', phase: 7 },
   { to: '/audit', label: 'Audit Logs' },

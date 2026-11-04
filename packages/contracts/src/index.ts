@@ -86,3 +86,7 @@ export * from './logs.js';
 export * from './traces.js';
 export * from './metrics.js';
 export * from './alerting.js';
+export * from './alert-preview.js';
+export * from './maintenance.js';
+export * from './alert-channels.js';
+export * from './deployments.js';

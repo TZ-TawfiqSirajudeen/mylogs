@@ -548,6 +548,8 @@ describe('authentication bypass: every API route is protected', () => {
   // The ONLY routes that may be reached without a session. Anything new must be added here deliberately.
   const PUBLIC = new Set([
     'GET /healthz', 'GET /readyz', 'GET /api/v1/auth/config', 'GET /api/v1/auth/oidc/login', 'GET /api/v1/auth/oidc/callback',
+    // Deployments (ADR-0011): authenticated by an ingestion token OR a session inside its own onRequest hook (apps/api/test/deployments.test.ts proves 401/403 for anonymous, forged and wrong-scope callers).
+    'POST /api/v1/deployments',
   ]);
   const isDocs = (url: string) => url === '/docs' || url.startsWith('/docs/');
 

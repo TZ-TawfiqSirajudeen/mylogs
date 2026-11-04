@@ -17,7 +17,9 @@ export const WEBHOOK_LIMITS = { timeoutMs: 5_000, maxBodyBytes: 16 * 1024, maxRe
 
 export type WebhookErrorCode =
   | 'invalid_url' | 'insecure_scheme' | 'blocked_target' | 'dns_failure' | 'timeout' | 'connection_failed' | 'tls_error'
-  | 'redirect_not_followed' | 'http_client_error' | 'http_server_error' | 'rate_limited_by_receiver' | 'body_too_large';
+  | 'redirect_not_followed' | 'http_client_error' | 'http_server_error' | 'rate_limited_by_receiver' | 'body_too_large'
+  // SMTP (ADR-0008)
+  | 'smtp_rejected' | 'smtp_temporary_failure' | 'smtp_auth_failed' | 'smtp_tls_required' | 'smtp_protocol_error' | 'recipients_rejected' | 'invalid_address' | 'blocked_port';
 
 export interface WebhookResult {
   ok: boolean;
@@ -74,14 +76,22 @@ export function signPayload(secret: string, timestampSeconds: number, body: stri
 export interface WebhookRequest { url: string; secret: string; event: string; deliveryId: string; body: string; now: Date }
 export interface WebhookOptions { policy: NetworkPolicy; timeoutMs?: number; maxResponseBytes?: number }
 
-const fail = (code: WebhookErrorCode, message: string, retryable: boolean, httpStatus: number | null = null): WebhookResult => ({ ok: false, httpStatus, code, message, retryable });
+export const fail = (code: WebhookErrorCode, message: string, retryable: boolean, httpStatus: number | null = null): WebhookResult => ({ ok: false, httpStatus, code, message, retryable });
 
 export type WebhookSender = (req: WebhookRequest, opts: WebhookOptions) => Promise<WebhookResult>;
 
-export const sendWebhook: WebhookSender = async (req, opts) => {
-  if (Buffer.byteLength(req.body) > WEBHOOK_LIMITS.maxBodyBytes) return fail('body_too_large', 'The notification body exceeds the size limit', false);
+/** Slack incoming webhooks have no receiver-side signature check: the URL itself is the secret (stored encrypted, never returned). */
+export interface SlackRequest { url: string; event: string; deliveryId: string; body: string; now: Date }
+export type SlackSender = (req: SlackRequest, opts: WebhookOptions) => Promise<WebhookResult>;
+
+/**
+ * POSTs a JSON body to a user-supplied URL under every guard described at the top of this file. Shared by webhook and Slack channels so the
+ * SSRF protections, redirect policy, timeouts and response handling cannot drift apart. Error messages never contain the URL.
+ */
+export async function postJson(rawUrl: string, extraHeaders: Record<string, string>, body: string, opts: WebhookOptions): Promise<WebhookResult> {
+  if (Buffer.byteLength(body) > WEBHOOK_LIMITS.maxBodyBytes) return fail('body_too_large', 'The notification body exceeds the size limit', false);
   let target: Awaited<ReturnType<typeof checkWebhookTarget>>;
-  try { target = await checkWebhookTarget(req.url, opts.policy); } catch (e) {
+  try { target = await checkWebhookTarget(rawUrl, opts.policy); } catch (e) {
     if (e instanceof WebhookUrlError) return fail(e.code, e.message, e.code === 'dns_failure');
     return fail('connection_failed', 'The target could not be validated', true);
   }
@@ -90,13 +100,8 @@ export const sendWebhook: WebhookSender = async (req, opts) => {
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
   const timeoutMs = opts.timeoutMs ?? WEBHOOK_LIMITS.timeoutMs;
   const cap = opts.maxResponseBytes ?? WEBHOOK_LIMITS.maxResponseBytes;
-  const ts = Math.floor(req.now.getTime() / 1000);
-  const payload = Buffer.from(req.body);
-  const headers = {
-    'content-type': 'application/json', 'content-length': String(payload.length), 'user-agent': 'nexus-alerting/1', accept: '*/*',
-    'x-nexus-event': req.event, 'x-nexus-delivery': req.deliveryId, 'x-nexus-signature': signPayload(req.secret, ts, req.body),
-  };
-
+  const payload = Buffer.from(body);
+  const headers = { 'content-type': 'application/json', 'content-length': String(payload.length), 'user-agent': 'nexus-alerting/1', accept: '*/*', ...extraHeaders };
   return new Promise<WebhookResult>((resolve) => {
     let settled = false;
     const done = (r: WebhookResult) => { if (!settled) { settled = true; clearTimeout(timer); resolve(r); } };
@@ -128,4 +133,12 @@ export const sendWebhook: WebhookSender = async (req, opts) => {
     });
     r.end(payload);
   });
+}
+
+export const sendWebhook: WebhookSender = (req, opts) => {
+  const ts = Math.floor(req.now.getTime() / 1000);
+  return postJson(req.url, { 'x-nexus-event': req.event, 'x-nexus-delivery': req.deliveryId, 'x-nexus-signature': signPayload(req.secret, ts, req.body) }, req.body, opts);
 };
+
+export const sendSlack: SlackSender = (req, opts) =>
+  postJson(req.url, { 'x-nexus-event': req.event, 'x-nexus-delivery': req.deliveryId }, req.body, opts);

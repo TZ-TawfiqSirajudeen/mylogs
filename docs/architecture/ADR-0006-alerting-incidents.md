@@ -41,6 +41,6 @@ E-mail, Slack, Teams, PagerDuty/Opsgenie and any non-webhook channel · anomaly/
 - **Log counts use event time** (`ts`), so records that arrive late are counted by the evaluation after they arrive, and a log rule can under-count the most recent minute on a slow pipeline.
 - **A missing metric looks like no data**, including a delta counter that simply had no increments: use `noDataPolicy = ok` for such metrics.
 - **At-least-once delivery:** a worker that crashes after the receiver answered but before the row is updated resends after the lease expires; receivers should de-duplicate on `X-Nexus-Delivery`.
-- **One evaluation per interval, no catch-up:** if the worker is down, missed evaluations are not replayed; the next one looks at the current window.
+- **One evaluation per interval, no catch-up by default:** if the worker is down, missed evaluations are counted but, with the default `missedPolicy: skip`, not replayed; the next one looks at the current window. A per-rule `replay` policy and recurring maintenance windows were added by [ADR-0010](ADR-0010-maintenance-windows-and-replay.md).
 - The window starts at the minute boundary containing `now - window` (the metric store aggregates whole minutes), so a window is up to one minute longer than configured.
 - Scale: see "Measured limits" in [alerting.md](../alerting.md).

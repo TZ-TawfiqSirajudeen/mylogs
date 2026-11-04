@@ -87,7 +87,8 @@ export const LogFacets = z.object({
 // ---------------------------------------------------------------- ingestion tokens, saved queries, stats
 export const IngestTokenCreate = z.object({
   name: z.string().trim().min(1).max(80),
-  signals: z.array(z.enum(['logs', 'traces', 'metrics'])).min(1).max(3).default(['logs', 'traces', 'metrics']),
+  /** `deployments` (ADR-0011) is opt-in: the default stays the three telemetry signals. */
+  signals: z.array(z.enum(['logs', 'traces', 'metrics', 'deployments'])).min(1).max(4).default(['logs', 'traces', 'metrics']),
   retentionDays: z.number().int().min(1).max(90).default(30),
   redaction: z.object({
     enabled: z.boolean().default(true),

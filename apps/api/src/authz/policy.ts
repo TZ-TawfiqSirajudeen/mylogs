@@ -17,7 +17,9 @@ export type ProjectAction =
   | 'project:read' | 'project:update' | 'environment:manage' | 'member:manage'
   | 'telemetry:read' | 'connection:manage' | 'incident:write'
   /** Alert rules, incidents, channels and silences: everyone with project access may read; engineers act on incidents ('incident:write'); only admins configure ('alert:manage'). */
-  | 'alert:read' | 'alert:manage';
+  | 'alert:read' | 'alert:manage'
+  /** Record deployments (change markers, ADR-0011) with a session; CI uses an ingestion token with the `deployments` scope instead. Reading needs only 'telemetry:read'. */
+  | 'deployment:write';
 
 const ORG_ACTIONS: Record<OrgRole, readonly OrgAction[]> = {
   owner: ['project:create', 'audit:read', 'org:members:read', 'org:members:manage'],
@@ -27,8 +29,8 @@ const ORG_ACTIONS: Record<OrgRole, readonly OrgAction[]> = {
 };
 
 const PROJECT_ACTIONS: Record<ProjectRole, readonly ProjectAction[]> = {
-  project_admin: ['project:read', 'project:update', 'environment:manage', 'member:manage', 'telemetry:read', 'connection:manage', 'incident:write', 'alert:read', 'alert:manage'],
-  engineer: ['project:read', 'telemetry:read', 'incident:write', 'alert:read'],
+  project_admin: ['project:read', 'project:update', 'environment:manage', 'member:manage', 'telemetry:read', 'connection:manage', 'incident:write', 'alert:read', 'alert:manage', 'deployment:write'],
+  engineer: ['project:read', 'telemetry:read', 'incident:write', 'alert:read', 'deployment:write'],
   viewer: ['project:read', 'telemetry:read', 'alert:read'],
 };
 

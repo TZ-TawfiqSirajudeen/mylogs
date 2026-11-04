@@ -9,6 +9,7 @@ import { Button, Card, EmptyState, ErrorState, Loading } from '../ui';
 import { PRESETS } from './logs/model';
 import { traceLink, tracesLink } from './traces/model';
 import { fieldClass, ProjectGate } from './traces/shared';
+import { useDeploymentMarkers } from './deployments/useMarkers';
 import { utc } from './logs/model';
 
 type Names = z.infer<typeof MetricNameInfo>[];
@@ -33,7 +34,15 @@ function Body({ projectId }: { projectId: string }) {
   const [service, setService] = useState(sp.get('svc') ?? '');
   const [agg, setAgg] = useState<string>(sp.get('agg') ?? '');
   const [group, setGroup] = useState<string[]>((sp.get('group') ?? '').split(',').filter(Boolean).slice(0, 2));
-  const [range, setRange] = useState(sp.get('range') ?? '1h');
+  // A deep link (e.g. from an incident) may carry an absolute window and an environment: `range=custom&from=…&to=…&env=<id>`.
+  const [custom, setCustom] = useState<{ from: string; to: string } | null>(() => {
+    const from = sp.get('from'), to = sp.get('to');
+    if (sp.get('range') !== 'custom' || !from || !to) return null;
+    const a = Date.parse(from), z = Date.parse(to);
+    return Number.isFinite(a) && Number.isFinite(z) && a < z && z - a <= 31 * 24 * 3600_000 ? { from: new Date(a).toISOString(), to: new Date(z).toISOString() } : null;
+  });
+  const [envId] = useState(() => (/^[0-9a-f-]{36}$/i.test(sp.get('env') ?? '') ? sp.get('env')! : ''));
+  const [range, setRange] = useState(custom ? 'custom' : sp.get('range') === 'custom' ? '1h' : sp.get('range') ?? '1h');
   const [filters, setFilters] = useState<{ key: string; value: string }[]>(sp.getAll('f').slice(0, 5).map((x) => { const [key, ...v] = x.split('~'); return { key: key ?? '', value: v.join('~') }; }).filter((f) => f.key));
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -48,13 +57,15 @@ function Body({ projectId }: { projectId: string }) {
 
   const preset = PRESETS.find((p) => p.key === range) ?? PRESETS[2];
   const body = useMemo(() => ({
-    from: new Date(nowMs - preset.ms).toISOString(), to: new Date(nowMs).toISOString(), metric, agg: effectiveAgg,
-    ...(service ? { service } : {}), filters: filters.filter((f) => f.value !== ''), groupBy: group,
-  }), [nowMs, preset.ms, metric, effectiveAgg, service, filters, group]);
+    from: custom && range === 'custom' ? custom.from : new Date(nowMs - preset.ms).toISOString(), to: custom && range === 'custom' ? custom.to : new Date(nowMs).toISOString(), metric, agg: effectiveAgg,
+    ...(service ? { service } : {}), filters: filters.filter((f) => f.value !== ''), groupBy: group, ...(envId ? { environmentIds: [envId] } : {}),
+  }), [nowMs, preset.ms, custom, range, envId, metric, effectiveAgg, service, filters, group]);
   const result = useMutation({ mutationFn: () => api<Result>('POST', `${base}/metrics/query`, body) });
 
   const run = () => {
     const n = new URLSearchParams({ p: projectId, metric, range });
+    if (custom && range === 'custom') { n.set('from', custom.from); n.set('to', custom.to); }
+    if (envId) n.set('env', envId);
     if (service) n.set('svc', service);
     if (agg) n.set('agg', agg);
     if (group.length) n.set('group', group.join(','));
@@ -73,6 +84,8 @@ function Body({ projectId }: { projectId: string }) {
     kind, tone: TONES[i % TONES.length]!, dashed: i >= TONES.length, points: s.points,
   }));
   const exemplars = (r?.series ?? []).flatMap((s) => s.exemplars).sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 8);
+  // Change markers (deployments, ADR-0011) for the charted window, for the selected service (all services when none) and the queried environment, if the link named one.
+  const deploys = useDeploymentMarkers(projectId, r?.from, r?.to, { service: service || undefined, environmentId: (body as { environmentIds?: string[] }).environmentIds?.[0] });
 
   return (
     <div className="space-y-3">
@@ -96,7 +109,7 @@ function Body({ projectId }: { projectId: string }) {
               <label className="text-xs">Aggregation
                 <select className={`${fieldClass} mt-0.5 block`} value={effectiveAgg} onChange={(e) => setAgg(e.target.value)}>{allowedAggs.map((a) => <option key={a} value={a}>{a}</option>)}</select></label>
               <label className="text-xs">Time range
-                <select className={`${fieldClass} mt-0.5 block`} value={range} onChange={(e) => setRange(e.target.value)}>{PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}</select></label>
+                <select className={`${fieldClass} mt-0.5 block`} value={range} onChange={(e) => { setRange(e.target.value); if (e.target.value !== 'custom') setCustom(null); }}>{custom && <option value="custom">Window from link ({custom.from.slice(0, 16).replace('T', ' ')} to {custom.to.slice(0, 16).replace('T', ' ')} UTC)</option>}{PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}</select></label>
               <Button type="submit" disabled={result.isPending}>{result.isPending ? 'Running…' : 'Run query'}</Button>
             </div>
             <div className="flex flex-wrap items-start gap-4 text-sm">
@@ -133,7 +146,9 @@ function Body({ projectId }: { projectId: string }) {
               </div>
               {series.length === 0
                 ? <EmptyState title="No data for this selection">{r.notes[0] ?? 'Nothing matches. Widen the time range or remove filters.'}</EmptyState>
-                : <TimelineChart title={r.metric} unit={r.unit ?? r.agg ?? ''} series={series} stepMs={r.stepMs} summary={`${series.length} series, ${effectiveAgg}.`} />}
+                : <TimelineChart title={r.metric} unit={r.unit ?? r.agg ?? ''} series={series} stepMs={r.stepMs} summary={`${series.length} series, ${effectiveAgg}.`} markers={deploys.markers} />}
+              {deploys.failed && <p role="note" data-testid="markers-unavailable" className="mt-1 text-xs text-slate-600 dark:text-slate-400">Deployment markers could not be loaded; the chart above is complete without them.</p>}
+              {deploys.truncated && <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">Only the newest 200 deployments in this window are marked. <Link className="text-indigo-700 underline dark:text-indigo-300" to={`/deployments?p=${projectId}`}>All deployments</Link></p>}
               {drawn.length > 0 && (
                 <table className="mt-3 w-full text-left text-xs" aria-label="Series summary">
                   <thead className="text-slate-600 dark:text-slate-400"><tr><th scope="col" className="py-1">Series</th><th scope="col" className="py-1 text-right">Latest</th><th scope="col" className="py-1 text-right">Windows with data</th></tr></thead>

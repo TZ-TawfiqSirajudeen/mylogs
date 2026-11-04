@@ -47,7 +47,8 @@ export async function makeWorld(mongoUri: string, policy: NetworkPolicy = { ...S
 export const metricRule = (w: Pick<World, 'envA'>, over: Partial<AlertRuleCreate> = {}): AlertRuleCreate => ({
   name: `rule-${Math.random().toString(36).slice(2, 8)}`, description: '', severity: 'critical', environmentId: w.envA, enabled: true,
   query: { kind: 'metric', metric: 'http.errors', filters: [], groupBy: [], agg: 'max' }, condition: { op: 'gt', threshold: 10 },
-  windowSeconds: 300, forSeconds: 120, resolveAfterSeconds: 120, noDataPolicy: 'keep', intervalSeconds: 60, channelIds: [], ...over,
+  windowSeconds: 300, forSeconds: 120, resolveAfterSeconds: 120, noDataPolicy: 'keep', intervalSeconds: 60, channelIds: [],
+  missedPolicy: 'skip', maxReplayEvaluations: 5, staleNotificationSeconds: 900, ...over,
 });
 
 /** A scripted metric store: `series` is what the next query returns; every call is recorded. */

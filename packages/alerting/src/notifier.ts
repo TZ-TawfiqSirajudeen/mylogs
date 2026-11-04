@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AlertDeliveryDoc, AlertRuleDoc, AlertSilenceDoc, Database, IncidentDoc, IncidentEventDoc } from '@nexus/database';
 import { channelCol, DAY_MS, RETENTION, silenceCol } from './common.js';
+import { findSuppressingWindow } from './maintenance.js';
 import { describeOp, formatDuration } from './state.js';
 
 export type DeliveryEvent = AlertDeliveryDoc['event'];
@@ -35,6 +36,12 @@ export function buildPayload(event: DeliveryEvent, incident: IncidentDoc, link: 
 export interface PlannedNotifications { deliveries: AlertDeliveryDoc[]; events: IncidentEventDoc[] }
 
 /**
+ * Extra facts about a notification that is created for a REPLAYED evaluation (ADR-0010). `now` stays the processing time (it stamps the delivery rows and drives
+ * the rate limit); `eventAt` is when the transition happened. A replayed transition older than `staleAfterSeconds` is recorded as `stale` and never sent.
+ */
+export interface PlanContext { eventAt?: Date; replayed?: boolean; staleAfterSeconds?: number }
+
+/**
  * Decides, for one incident event, what each channel will do: send, be suppressed by a silence, or be dropped by the channel's rate limit.
  * Suppressed and rate-limited notifications are RECORDED (a delivery row and an incident timeline event) so nothing disappears silently, but
  * nothing is sent. Silences never prevent the incident itself from being recorded.
@@ -44,7 +51,7 @@ export class Notifier {
 
   async plan(
     rule: Pick<AlertRuleDoc, '_id' | 'orgId' | 'projectId' | 'environmentId' | 'severity' | 'channelIds'>,
-    incident: IncidentDoc, event: DeliveryEvent, now: Date,
+    incident: IncidentDoc, event: DeliveryEvent, now: Date, plan: PlanContext = {},
   ): Promise<PlannedNotifications> {
     let channelIds = rule.channelIds;
     if (event === 'incident.resolved') {
@@ -58,6 +65,11 @@ export class Notifier {
     if (channels.length === 0) return { deliveries: [], events: [] };
     const silences = await silenceCol(this.db).find({ kind: 'silence', orgId: incident.orgId, projectId: incident.projectId, startsAt: { $lte: now }, endsAt: { $gt: now } }).limit(100).toArray();
     const silence = silences.find((s) => silenceMatches(s, rule, now)) ?? null;
+    const eventAt = plan.eventAt ?? now;
+    const ageMs = now.getTime() - eventAt.getTime();
+    const stale = plan.replayed === true && ageMs > (plan.staleAfterSeconds ?? 900) * 1000;
+    // A maintenance window counts when it was active when the notification is created OR when the transition happened (ADR-0010 #6).
+    const window = silence || stale ? null : await findSuppressingWindow(this.db, rule, eventAt.getTime() === now.getTime() ? [now] : [now, eventAt]);
     const link = this.opts.publicUrl ? `${this.opts.publicUrl.replace(/\/$/, '')}/incidents/${incident._id}?p=${incident.projectId}` : null;
     const payload = buildPayload(event, incident, link);
     const since = new Date(now.getTime() - 60_000);
@@ -67,12 +79,23 @@ export class Notifier {
     for (const ch of channels) {
       const base: AlertDeliveryDoc = {
         _id: randomUUID(), orgId: incident.orgId, projectId: incident.projectId, incidentId: incident._id, channelId: ch._id, channelName: ch.name,
-        event, status: 'pending', attempts: 0, nextAttemptAt: now, lease: null, lastError: null, httpStatus: null, silenceId: null, payload,
+        event, status: 'pending', attempts: 0, nextAttemptAt: now, lease: null, lastError: null, httpStatus: null, silenceId: null, maintenanceId: null, payload,
         createdAt: now, deliveredAt: null, expireAt: new Date(now.getTime() + RETENTION.deliveryDays * DAY_MS),
       };
+      if (stale) {
+        const minutes = Math.max(1, Math.round(ageMs / 60_000));
+        deliveries.push({ ...base, status: 'stale', nextAttemptAt: null, lastError: { code: 'stale', message: `Replayed transition is ${minutes} min old (limit ${Math.round((plan.staleAfterSeconds ?? 900) / 60)} min)` } });
+        events.push({ id: randomUUID(), type: 'notification_suppressed', at: now, actorUserId: null, message: `Notification to "${ch.name}" not sent: stale (the transition was replayed ${minutes} min after it happened)`, data: { channelId: ch._id, reason: 'stale', event, eventAt: eventAt.toISOString() } });
+        continue;
+      }
       if (silence) {
         deliveries.push({ ...base, status: 'suppressed', nextAttemptAt: null, silenceId: silence._id });
         events.push({ id: randomUUID(), type: 'notification_suppressed', at: now, actorUserId: null, message: `Notification to "${ch.name}" suppressed by a silence: ${silence.comment}`, data: { channelId: ch._id, reason: 'silence', silenceId: silence._id, event } });
+        continue;
+      }
+      if (window) {
+        deliveries.push({ ...base, status: 'suppressed', nextAttemptAt: null, maintenanceId: window._id });
+        events.push({ id: randomUUID(), type: 'notification_suppressed', at: now, actorUserId: null, message: `Notification to "${ch.name}" suppressed by maintenance window "${window.name}"`, data: { channelId: ch._id, reason: 'maintenance', maintenanceId: window._id, event } });
         continue;
       }
       const recent = await this.db.c.alertDeliveries.countDocuments({ orgId: incident.orgId, projectId: incident.projectId, channelId: ch._id, createdAt: { $gte: since }, status: { $in: ['pending', 'delivered', 'failed'] } });

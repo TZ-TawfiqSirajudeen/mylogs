@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Id } from './common.js';
 import { LogFilter, LogQuery, SEVERITIES } from './logs.js';
 import { MetricName } from './metrics.js';
+import { MISSED_POLICIES, REPLAY_LIMITS } from './maintenance.js';
 
 const iso = z.iso.datetime();
 
@@ -101,8 +102,14 @@ const ruleFields = {
   noDataPolicy: z.enum(NO_DATA_POLICIES),
   intervalSeconds: z.number().int().min(ALERT_LIMITS.minIntervalSeconds).max(ALERT_LIMITS.maxIntervalSeconds),
   channelIds: z.array(Id).max(ALERT_LIMITS.maxChannelsPerRule),
+  /** What to do when evaluations were missed (worker down, lease expired): `skip` = only count them, `replay` = re-evaluate the latest ones in order (ADR-0010). */
+  missedPolicy: z.enum(MISSED_POLICIES),
+  /** Replay: at most this many missed interval boundaries are re-evaluated per catch-up. */
+  maxReplayEvaluations: z.number().int().min(1).max(REPLAY_LIMITS.maxEvaluations),
+  /** Replay: a replayed transition older than this (at processing time) is recorded as `stale` and not sent. */
+  staleNotificationSeconds: z.number().int().min(0).max(REPLAY_LIMITS.maxStaleSeconds),
 };
-const ruleShape = {
+export const ruleShape = {
   ...ruleFields,
   description: ruleFields.description.default(''),
   enabled: ruleFields.enabled.default(true),
@@ -111,6 +118,9 @@ const ruleShape = {
   noDataPolicy: ruleFields.noDataPolicy.default('keep'),
   intervalSeconds: ruleFields.intervalSeconds.default(60),
   channelIds: ruleFields.channelIds.default([]),
+  missedPolicy: ruleFields.missedPolicy.default('skip'),
+  maxReplayEvaluations: ruleFields.maxReplayEvaluations.default(REPLAY_LIMITS.defaultMaxEvaluations),
+  staleNotificationSeconds: ruleFields.staleNotificationSeconds.default(REPLAY_LIMITS.defaultStaleSeconds),
 };
 
 /** Cross-field rules (used for create and for the merged result of an update). */
@@ -149,36 +159,15 @@ export const AlertRuleDto = z.object({
   lastError: z.object({ at: iso, message: z.string() }).nullable(),
   lastValue: z.number().nullable(),
   noDataSince: iso.nullable(),
+  /** Evaluations that were due but not run on time (cumulative): replayed = re-evaluated in order, skipped = only counted. */
+  missedEvaluations: z.object({ total: z.number(), replayed: z.number(), skipped: z.number(), lastAt: iso.nullable() }),
   groups: z.array(RuleGroupStateDto),
   truncatedGroups: z.boolean(),
   createdBy: Id, createdAt: iso, updatedAt: iso,
 });
 export type AlertRuleDto = z.infer<typeof AlertRuleDto>;
 
-// ---------------------------------------------------------------- channels
-export const ChannelCreate = z.strictObject({
-  type: z.literal('webhook'),
-  name: z.string().trim().min(1).max(80),
-  url: z.string().trim().min(1).max(ALERT_LIMITS.maxUrlChars),
-  /** Write-only: used to sign each delivery (HMAC-SHA256). It is stored encrypted and is never returned. */
-  signingSecret: z.string().min(ALERT_LIMITS.minSecretChars).max(ALERT_LIMITS.maxSecretChars),
-  enabled: z.boolean().default(true),
-  rateLimitPerMinute: z.number().int().min(1).max(ALERT_LIMITS.maxRateLimitPerMinute).default(20),
-});
-export const ChannelUpdate = z.strictObject({
-  name: ChannelCreate.shape.name, url: ChannelCreate.shape.url, signingSecret: ChannelCreate.shape.signingSecret,
-  enabled: z.boolean(), rateLimitPerMinute: ChannelCreate.shape.rateLimitPerMinute,
-}).partial().refine((b) => Object.keys(b).length > 0, 'Nothing to update');
-export const ChannelDto = z.object({
-  id: Id, projectId: Id, type: z.literal('webhook'), name: z.string(), enabled: z.boolean(),
-  /** Scheme, host and port only. The path and query of a webhook URL are credentials in practice (many providers embed a token), so they are never returned. */
-  urlDisplay: z.string(),
-  hasSigningSecret: z.boolean(),
-  rateLimitPerMinute: z.number(),
-  lastTest: z.object({ at: iso, ok: z.boolean(), message: z.string() }).nullable(),
-  createdBy: Id, createdAt: iso, updatedAt: iso,
-});
-export type ChannelDto = z.infer<typeof ChannelDto>;
+// Notification channels (webhook, Slack, e-mail) live in ./alert-channels.ts (ADR-0008).
 
 // ---------------------------------------------------------------- silences
 export const SilenceCreate = z.strictObject({
@@ -232,13 +221,13 @@ export const ResolveBody = z.strictObject({ note: z.string().trim().max(500).opt
 export const AckBody = z.strictObject({ note: z.string().trim().max(500).optional() }).default({});
 
 // ---------------------------------------------------------------- deliveries
-export const DELIVERY_STATUSES = ['pending', 'delivered', 'failed', 'suppressed', 'rate_limited'] as const;
+export const DELIVERY_STATUSES = ['pending', 'delivered', 'failed', 'suppressed', 'rate_limited', 'stale'] as const;
 export const DeliveryDto = z.object({
   id: Id, incidentId: Id.nullable(), channelId: Id, channelName: z.string(),
   event: z.enum(['incident.opened', 'incident.resolved', 'test']),
   status: z.enum(DELIVERY_STATUSES), attempts: z.number(),
   createdAt: iso, deliveredAt: iso.nullable(), nextAttemptAt: iso.nullable(),
-  lastError: z.object({ code: z.string(), message: z.string() }).nullable(), httpStatus: z.number().nullable(), silenceId: Id.nullable(),
+  lastError: z.object({ code: z.string(), message: z.string() }).nullable(), httpStatus: z.number().nullable(), silenceId: Id.nullable(), maintenanceId: Id.nullable(),
 });
 export type DeliveryDto = z.infer<typeof DeliveryDto>;
 export const TestSendResult = z.object({ ok: z.boolean(), status: z.number().nullable(), message: z.string(), delivery: DeliveryDto });

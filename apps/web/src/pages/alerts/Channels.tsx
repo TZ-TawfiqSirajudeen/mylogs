@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { ALERT_LIMITS, EMAIL_LIMITS, type ChannelType, type SmtpSecurity } from '@nexus/contracts';
 import { api } from '../../api';
 import { Badge, Button, Card, EmptyState, ErrorState, Loading } from '../../ui';
 import { fmtTime } from '../sources/parts';
 import { ProjectGate } from '../traces/shared';
+import { channelBody, defaultPort, draftReady, recipientsProblem, splitRecipients } from './channel-form';
+import { MaintenanceCard } from './MaintenanceWindows';
 import { AlertTabs, can, errorText, field, Table, THead, type Channel, type Page, type Rule, type Silence } from './shared';
 
 export default function Channels() {
@@ -24,25 +27,42 @@ function Body({ project }: { project: Project }) {
       {!manage && <p className="text-sm text-slate-600 dark:text-slate-400" data-testid="channels-readonly">You have read-only access. Project admins manage channels and silences.</p>}
       <ChannelsCard project={project} manage={manage} />
       <SilencesCard project={project} manage={manage} />
+      <MaintenanceCard project={project} manage={manage} />
     </div>
   );
 }
+
+const TYPE_LABEL = { webhook: 'Webhook', slack: 'Slack', email: 'E-mail' } as const;
+const SECURITY_HELP = { starttls: 'STARTTLS (port 587, upgrade required)', tls: 'TLS (port 465, implicit)', none: 'None (development only)' } as const;
 
 function ChannelsCard({ project, manage }: { project: Project; manage: boolean }) {
   const qc = useQueryClient();
   const base = `/api/v1/projects/${project.id}/alert-channels`;
   const q = useQuery({ queryKey: ['alert-channels', project.id], queryFn: () => api<Page<Channel>>('GET', `${base}?limit=100`) });
+  const [type, setType] = useState<ChannelType>('webhook');
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const [secret, setSecret] = useState('');
   const [rate, setRate] = useState(20);
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState(587);
+  const [security, setSecurity] = useState<SmtpSecurity>('starttls');
+  const [smtpUser, setSmtpUser] = useState('');
+  const [smtpPass, setSmtpPass] = useState('');
+  const [from, setFrom] = useState('');
+  const [recipientsText, setRecipientsText] = useState('');
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const refresh = () => void qc.invalidateQueries({ queryKey: ['alert-channels', project.id] });
+  const draft = { type, name, url, secret, rate, host, port, security, smtpUser, smtpPass, from, recipientsText };
+  const recipients = splitRecipients(recipientsText);
+  const recipientsError = recipientsProblem(recipients);
+  const credentialsOk = (smtpUser === '') === (smtpPass === '');
+  const ready = draftReady(draft, ALERT_LIMITS.minSecretChars);
 
   const create = useMutation({
-    mutationFn: () => api<Channel>('POST', base, { type: 'webhook', name: name.trim(), url: url.trim(), signingSecret: secret, rateLimitPerMinute: rate }),
-    // The secret lives only in this component's state until the request is sent; it is cleared at once and never stored or shown again.
-    onSuccess: (c) => { setName(''); setUrl(''); setSecret(''); setMsg({ ok: true, text: `Channel “${c.name}” created.` }); refresh(); },
+    mutationFn: () => api<Channel>('POST', base, channelBody(draft)),
+    // Secrets (signing secret, Slack URL, SMTP password) live only in this component's state until the request is sent; they are cleared at once and never stored or shown again.
+    onSuccess: (c) => { setName(''); setUrl(''); setSecret(''); setSmtpUser(''); setSmtpPass(''); setRecipientsText(''); setMsg({ ok: true, text: `Channel “${c.name}” created.` }); refresh(); },
     onError: (e) => setMsg({ ok: false, text: errorText(e) }),
   });
   const test = useMutation({
@@ -51,7 +71,8 @@ function ChannelsCard({ project, manage }: { project: Project; manage: boolean }
     onError: (e) => setMsg({ ok: false, text: errorText(e) }),
   });
   const toggle = useMutation({ mutationFn: (c: Channel) => api<Channel>('PATCH', `${base}/${c.id}`, { enabled: !c.enabled }), onSuccess: refresh, onError: (e) => setMsg({ ok: false, text: errorText(e) }) });
-  const remove = useMutation({ mutationFn: (c: Channel) => api('DELETE', `${base}/${c.id}`), onSuccess: () => { setMsg({ ok: true, text: 'Channel deleted. Its stored URL and secret were destroyed.' }); refresh(); }, onError: (e) => setMsg({ ok: false, text: errorText(e) }) });
+  const remove = useMutation({ mutationFn: (c: Channel) => api('DELETE', `${base}/${c.id}`), onSuccess: () => { setMsg({ ok: true, text: 'Channel deleted. Its stored secrets were destroyed.' }); refresh(); }, onError: (e) => setMsg({ ok: false, text: errorText(e) }) });
+  const pickSecurity = (s: SmtpSecurity) => { setSecurity(s); setPort(defaultPort(s)); };
 
   return (
     <Card title="Notification channels">
@@ -62,12 +83,17 @@ function ChannelsCard({ project, manage }: { project: Project; manage: boolean }
         {q.data?.items.length === 0 && <EmptyState title="No channels yet">Incidents are recorded without one, but nobody is notified.</EmptyState>}
         {!!q.data?.items.length && (
           <Table label="Notification channels" testid="channels-table" min="44rem">
-            <THead cols={['Name', 'Target', 'State', 'Limit', 'Last test', { sr: 'Actions' }]} />
+            <THead cols={['Name', 'Type', 'Target', 'State', 'Limit', 'Last test', { sr: 'Actions' }]} />
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {q.data.items.map((c) => (
                 <tr key={c.id} data-testid={`channel-row-${c.name}`}>
                   <td className="px-3 py-2 font-medium">{c.name}</td>
-                  <td className="px-3 py-2 font-mono text-xs">{c.urlDisplay}<span className="block font-sans text-slate-600 dark:text-slate-400">path and signing secret are write-only</span></td>
+                  <td className="px-3 py-2" data-testid="channel-type">{TYPE_LABEL[c.type]}</td>
+                  <td className="px-3 py-2 font-mono text-xs">{c.urlDisplay}
+                    {c.type === 'email'
+                      ? <span className="block font-sans text-slate-600 dark:text-slate-400" data-testid="channel-recipients">from {c.from} to {(c.recipientsMasked ?? []).join(', ')} · {c.smtp?.security === 'none' ? 'unencrypted' : c.smtp?.security === 'tls' ? 'TLS' : 'STARTTLS'} · {c.hasSmtpCredentials ? 'credentials stored (write-only)' : 'no authentication'}</span>
+                      : <span className="block font-sans text-slate-600 dark:text-slate-400">{c.type === 'slack' ? 'path is write-only' : 'path and signing secret are write-only'}</span>}
+                  </td>
                   <td className="px-3 py-2">{c.enabled ? <Badge tone="info">enabled</Badge> : <Badge>disabled</Badge>}</td>
                   <td className="px-3 py-2">{c.rateLimitPerMinute}/min</td>
                   <td className="px-3 py-2 text-xs" data-testid="channel-last-test">{c.lastTest ? <>{c.lastTest.ok ? 'ok' : 'failed'} · {fmtTime(c.lastTest.at)}<span className="block text-slate-600 dark:text-slate-400">{c.lastTest.message}</span></> : 'never'}</td>
@@ -83,13 +109,47 @@ function ChannelsCard({ project, manage }: { project: Project; manage: boolean }
           </Table>
         )}
         {manage && (
-          <form className="grid gap-3 md:grid-cols-4" onSubmit={(e) => { e.preventDefault(); setMsg(null); create.mutate(); }} aria-label="New webhook channel" data-testid="channel-form">
+          <form className="grid gap-3 md:grid-cols-4" onSubmit={(e) => { e.preventDefault(); setMsg(null); create.mutate(); }} aria-label={`New ${TYPE_LABEL[type]} channel`} data-testid="channel-form">
+            <label className="text-sm">Type
+              <select className={`${field} mt-0.5 block w-full`} value={type} onChange={(e) => setType(e.target.value as ChannelType)} data-testid="channel-type-select">
+                <option value="webhook">Webhook (signed JSON)</option><option value="slack">Slack (incoming webhook)</option><option value="email">E-mail (SMTP)</option>
+              </select>
+            </label>
             <label className="text-sm">Name<input required className={`${field} mt-0.5 block w-full`} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} data-testid="channel-name" /></label>
-            <label className="text-sm md:col-span-2">Webhook URL (https)<input required type="url" className={`${field} mt-0.5 block w-full font-mono`} value={url} maxLength={2048} onChange={(e) => setUrl(e.target.value)} placeholder="https://hooks.example.com/nexus" autoComplete="off" data-testid="channel-url" /></label>
             <label className="text-sm">Notifications per minute (max)<input type="number" min={1} max={60} className={`${field} mt-0.5 block w-full`} value={rate} onChange={(e) => setRate(Number(e.target.value))} /></label>
-            <label className="text-sm md:col-span-2">Signing secret (16+ characters, write-only)<input required type="password" minLength={16} maxLength={256} className={`${field} mt-0.5 block w-full`} value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" data-testid="channel-secret" /></label>
-            <div className="flex items-end"><Button type="submit" disabled={create.isPending || !name.trim() || !url.trim() || secret.length < 16} data-testid="channel-create">{create.isPending ? 'Creating…' : 'Add webhook channel'}</Button></div>
-            <p className="text-xs text-slate-600 md:col-span-4 dark:text-slate-400">Each delivery is a JSON POST with an <code>X-Nexus-Signature: t=…,v1=…</code> header (HMAC-SHA256 of <code>t.body</code> with this secret). The URL and secret are stored encrypted and are never shown again. Private, loopback and cloud-metadata addresses are refused; redirects are not followed.</p>
+            <span className="hidden md:block" />
+            {type !== 'email' && (
+              <label className="text-sm md:col-span-2">{type === 'slack' ? 'Slack incoming-webhook URL (write-only)' : 'Webhook URL (https)'}<input required type={type === 'slack' ? 'password' : 'url'} className={`${field} mt-0.5 block w-full font-mono`} value={url} maxLength={2048} onChange={(e) => setUrl(e.target.value)} placeholder={type === 'slack' ? 'https://hooks.slack.com/services/…' : 'https://hooks.example.com/nexus'} autoComplete="off" data-testid="channel-url" /></label>
+            )}
+            {type === 'webhook' && (
+              <label className="text-sm md:col-span-2">Signing secret (16+ characters, write-only)<input required type="password" minLength={16} maxLength={256} className={`${field} mt-0.5 block w-full`} value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" data-testid="channel-secret" /></label>
+            )}
+            {type === 'email' && (
+              <>
+                <label className="text-sm md:col-span-2">SMTP host<input required className={`${field} mt-0.5 block w-full font-mono`} value={host} maxLength={253} onChange={(e) => setHost(e.target.value)} placeholder="smtp.example.com" autoComplete="off" data-testid="smtp-host" /></label>
+                <label className="text-sm">Security
+                  <select className={`${field} mt-0.5 block w-full`} value={security} onChange={(e) => pickSecurity(e.target.value as SmtpSecurity)} data-testid="smtp-security">
+                    <option value="starttls">{SECURITY_HELP.starttls}</option><option value="tls">{SECURITY_HELP.tls}</option><option value="none">{SECURITY_HELP.none}</option>
+                  </select>
+                </label>
+                <label className="text-sm">Port<input type="number" min={1} max={65535} className={`${field} mt-0.5 block w-full`} value={port} onChange={(e) => setPort(Number(e.target.value))} data-testid="smtp-port" /></label>
+                <label className="text-sm">SMTP user name (write-only, optional)<input className={`${field} mt-0.5 block w-full`} value={smtpUser} maxLength={256} onChange={(e) => setSmtpUser(e.target.value)} autoComplete="off" data-testid="smtp-user" /></label>
+                <label className="text-sm">SMTP password (write-only)<input type="password" className={`${field} mt-0.5 block w-full`} value={smtpPass} maxLength={256} onChange={(e) => setSmtpPass(e.target.value)} autoComplete="new-password" data-testid="smtp-pass" /></label>
+                <label className="text-sm">From address<input required type="email" className={`${field} mt-0.5 block w-full`} value={from} maxLength={254} onChange={(e) => setFrom(e.target.value)} placeholder="alerts@example.com" data-testid="email-from" /></label>
+                <label className="text-sm md:col-span-4">Recipients (up to {EMAIL_LIMITS.maxRecipients}; separate with commas, spaces or new lines)
+                  <textarea required rows={2} className={`${field} mt-0.5 block w-full font-mono`} value={recipientsText} onChange={(e) => setRecipientsText(e.target.value)} placeholder="oncall@example.com, sre@example.com" data-testid="email-recipients" />
+                </label>
+                {recipientsError && <p role="alert" className="text-xs text-red-700 md:col-span-4 dark:text-red-300" data-testid="email-recipients-error">{recipientsError}</p>}
+                {!credentialsOk && <p role="alert" className="text-xs text-red-700 md:col-span-4 dark:text-red-300">Enter both the SMTP user name and password, or neither.</p>}
+              </>
+            )}
+            <div className="flex items-end"><Button type="submit" disabled={create.isPending || !ready} data-testid="channel-create">{create.isPending ? 'Creating…' : `Add ${TYPE_LABEL[type].toLowerCase()} channel`}</Button></div>
+            <p className="text-xs text-slate-600 md:col-span-4 dark:text-slate-400">
+              {type === 'webhook' && <>Each delivery is a JSON POST with an <code>X-Nexus-Signature: t=…,v1=…</code> header (HMAC-SHA256 of <code>t.body</code> with this secret). </>}
+              {type === 'slack' && <>Posts a formatted message with a link back to the incident. Slack incoming-webhook URLs are credentials: stored encrypted, never shown again. </>}
+              {type === 'email' && <>Sends a plain-text and HTML message over SMTP with certificate verification; only ports 587, 465 and 2525 are allowed. The SMTP credentials are stored encrypted and never shown again; recipients are masked in this list. </>}
+              The target is checked when saved and on every send: private, loopback and cloud-metadata addresses are refused; redirects are not followed. Use <em>Send test</em> after adding a channel.
+            </p>
           </form>
         )}
       </div>
@@ -126,7 +186,7 @@ function SilencesCard({ project, manage }: { project: Project; manage: boolean }
   const scope = (s: Silence) => [s.matchers.ruleIds?.length ? `rules: ${s.matchers.ruleIds.map(ruleName).join(', ')}` : '', s.matchers.severities?.length ? `severity: ${s.matchers.severities.join(', ')}` : '', s.matchers.environmentIds?.length ? `${s.matchers.environmentIds.length} environment(s)` : ''].filter(Boolean).join(' · ') || 'the whole project';
 
   return (
-    <Card title="Silences and maintenance windows">
+    <Card title="Silences (one-off)">
       <div className="space-y-4">
         {q.isPending && <Loading />}
         {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
